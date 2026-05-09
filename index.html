@@ -1,0 +1,1762 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Log Parser — Go Struct & JSON Beautifier</title>
+    <style>
+      :root {
+        --bg: #0e1116;
+        --panel: #161b22;
+        --panel-2: #1c232c;
+        --border: #2a313c;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --accent-2: #7ee787;
+        --warn: #f0883e;
+        --err: #ff7b72;
+        --key: #79c0ff;
+        --str: #a5d6ff;
+        --num: #ff966b;
+        --bool: #d2a8ff;
+        --null: #ff7b72;
+        --highlight: #f1c40f;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      header {
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: linear-gradient(180deg, #1a2230 0%, #0e1116 100%);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+      }
+      header .sub {
+        color: var(--muted);
+        font-size: 12px;
+        margin-left: 10px;
+      }
+      .container {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        height: calc(100vh - 60px);
+        padding: 12px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .panel-head {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .panel-head .title {
+        font-weight: 600;
+        font-size: 13px;
+        margin-right: auto;
+      }
+      .panel-body {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+      }
+      textarea#input {
+        width: 100%;
+        height: 100%;
+        resize: none;
+        border: none;
+        outline: none;
+        background: var(--panel);
+        color: var(--text);
+        font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        padding: 12px;
+      }
+      button,
+      select {
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 5px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #232b36;
+        border-color: var(--accent);
+      }
+      button.primary {
+        background: #1f6feb;
+        border-color: #1f6feb;
+        color: #fff;
+      }
+      button.primary:hover {
+        background: #2879ff;
+      }
+      .tabs {
+        display: flex;
+        gap: 4px;
+      }
+      .tab {
+        padding: 5px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .tab.active {
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+      .tab:hover {
+        color: var(--text);
+      }
+      input.search {
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 5px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        width: 200px;
+      }
+      /* Tree view */
+      .tree {
+        font-family: "JetBrains Mono", Consolas, monospace;
+        font-size: 12px;
+        padding: 10px 12px;
+        line-height: 1.6;
+      }
+      .tree .node {
+        padding-left: 16px;
+        position: relative;
+      }
+      .tree .node.root {
+        padding-left: 0;
+      }
+      .tree .toggle {
+        cursor: pointer;
+        display: inline-block;
+        width: 14px;
+        color: var(--muted);
+        user-select: none;
+      }
+      .tree .toggle:hover {
+        color: var(--accent);
+      }
+      .tree .key {
+        color: var(--key);
+      }
+      .tree .punct {
+        color: var(--muted);
+      }
+      .tree .str {
+        color: var(--str);
+      }
+      .tree .num {
+        color: var(--num);
+      }
+      .tree .bool {
+        color: var(--bool);
+      }
+      .tree .null {
+        color: var(--null);
+        font-style: italic;
+      }
+      .tree .meta {
+        color: var(--muted);
+        font-style: italic;
+        font-size: 11px;
+      }
+      .tree .collapsed > .children {
+        display: none;
+      }
+      .tree .collapsed > .preview {
+        display: inline;
+      }
+      .tree .preview {
+        display: none;
+        color: var(--muted);
+        margin-left: 4px;
+      }
+      .tree .row {
+        display: flex;
+        align-items: flex-start;
+        gap: 4px;
+        flex-wrap: wrap;
+      }
+      .tree .row.match {
+        background: rgba(241, 196, 15, 0.12);
+        border-radius: 3px;
+      }
+      .tree .copy-btn {
+        visibility: hidden;
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 10px;
+        margin-left: 8px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        border: 1px solid var(--border);
+      }
+      .tree .row:hover .copy-btn {
+        visibility: visible;
+      }
+      .tree .copy-btn:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      /* Metadata cards */
+      .meta-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 8px;
+        padding: 12px;
+      }
+      .meta-card {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+      }
+      .meta-card .lbl {
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .meta-card .val {
+        font-family: "JetBrains Mono", Consolas, monospace;
+        font-size: 12px;
+        word-break: break-all;
+        margin-top: 3px;
+        color: var(--accent-2);
+      }
+      /* Status */
+      .status {
+        padding: 6px 12px;
+        font-size: 11px;
+        color: var(--muted);
+        border-top: 1px solid var(--border);
+      }
+      .status.ok {
+        color: var(--accent-2);
+      }
+      .status.err {
+        color: var(--err);
+      }
+      /* JSON raw view */
+      pre.json-raw {
+        margin: 0;
+        padding: 12px;
+        font-family: "JetBrains Mono", Consolas, monospace;
+        font-size: 12px;
+        white-space: pre;
+        line-height: 1.55;
+      }
+      pre.json-raw .key {
+        color: var(--key);
+      }
+      pre.json-raw .str {
+        color: var(--str);
+      }
+      pre.json-raw .num {
+        color: var(--num);
+      }
+      pre.json-raw .bool {
+        color: var(--bool);
+      }
+      pre.json-raw .null {
+        color: var(--null);
+      }
+      /* Resizer hidden — using grid */
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      ::-webkit-scrollbar-track {
+        background: var(--bg);
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #2a313c;
+        border-radius: 5px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #3a4250;
+      }
+      .empty {
+        padding: 24px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 13px;
+      }
+      .toast {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: var(--accent-2);
+        color: #0e1116;
+        padding: 8px 14px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        opacity: 0;
+        transition: opacity 0.2s;
+        pointer-events: none;
+      }
+      .toast.show {
+        opacity: 1;
+      }
+      .badge {
+        display: inline-block;
+        padding: 1px 6px;
+        font-size: 10px;
+        border-radius: 3px;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        margin-left: 6px;
+      }
+      .badge.go {
+        background: #2d4a2d;
+        border-color: #3a5e3a;
+        color: var(--accent-2);
+      }
+      .badge.json {
+        background: #2d3d4a;
+        border-color: #3a4f5e;
+        color: var(--accent);
+      }
+      .badge.mixed {
+        background: #4a3d2d;
+        border-color: #5e4f3a;
+        color: var(--warn);
+      }
+      /* Session tabs (Chrome-style) */
+      .session-bar {
+        display: flex;
+        align-items: stretch;
+        background: #0a0d12;
+        border-bottom: 1px solid var(--border);
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: thin;
+      }
+      .session-bar::-webkit-scrollbar {
+        height: 4px;
+      }
+      .session-tab {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 7px 10px 7px 12px;
+        background: #14191f;
+        border-right: 1px solid var(--border);
+        cursor: pointer;
+        font-size: 12px;
+        color: var(--muted);
+        max-width: 220px;
+        min-width: 100px;
+        white-space: nowrap;
+        position: relative;
+        user-select: none;
+        flex-shrink: 0;
+      }
+      .session-tab:hover {
+        background: #1a2028;
+        color: var(--text);
+      }
+      .session-tab.active {
+        background: var(--panel);
+        color: var(--text);
+        border-bottom: 2px solid var(--accent);
+        margin-bottom: -1px;
+      }
+      .session-tab .tab-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1;
+        font-family: "JetBrains Mono", Consolas, monospace;
+      }
+      .session-tab .tab-label[contenteditable="true"] {
+        outline: 1px solid var(--accent);
+        background: var(--panel-2);
+        border-radius: 3px;
+        padding: 0 3px;
+      }
+      .session-tab .tab-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--muted);
+        flex-shrink: 0;
+      }
+      .session-tab.parsed .tab-dot {
+        background: var(--accent-2);
+      }
+      .session-tab.error .tab-dot {
+        background: var(--err);
+      }
+      .session-tab .tab-close {
+        opacity: 0.5;
+        padding: 0 4px;
+        border-radius: 3px;
+        font-size: 14px;
+        line-height: 1;
+      }
+      .session-tab .tab-close:hover {
+        opacity: 1;
+        background: rgba(255, 123, 114, 0.2);
+        color: var(--err);
+      }
+      .session-tab.active .tab-close {
+        opacity: 0.8;
+      }
+      .new-tab-btn {
+        background: transparent;
+        border: none;
+        color: var(--muted);
+        font-size: 18px;
+        line-height: 1;
+        padding: 0 14px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .new-tab-btn:hover {
+        background: #1a2028;
+        color: var(--accent-2);
+        border-color: transparent;
+      }
+      .container {
+        height: calc(100vh - 60px - 35px);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>
+          Log Parser
+          <span class="sub">Go-struct & JSON beautifier</span>
+        </h1>
+      </div>
+      <div style="display: flex; gap: 8px; align-items: center">
+        <button id="btnClear">Clear</button>
+      </div>
+    </header>
+
+    <div class="session-bar" id="sessionBar">
+      <button class="new-tab-btn" id="btnNewTab" title="New tab (Ctrl+T)">
+        +
+      </button>
+    </div>
+
+    <div class="container">
+      <!-- Input panel -->
+      <div class="panel">
+        <div class="panel-head">
+          <span class="title"
+            >Input <span id="formatBadge" class="badge">auto-detect</span></span
+          >
+          <button id="btnParse" class="primary">Parse →</button>
+          <button id="btnPaste">Paste</button>
+        </div>
+        <div class="panel-body">
+          <textarea
+            id="input"
+            spellcheck="false"
+            placeholder="Paste log disini (mendukung container log line, JSON, atau Go-struct dump dari %+v)"
+          ></textarea>
+        </div>
+        <div id="status" class="status">Siap. Paste log lalu klik Parse.</div>
+      </div>
+
+      <!-- Output panel -->
+      <div class="panel">
+        <div class="panel-head">
+          <span class="title">Output</span>
+          <div class="tabs">
+            <div class="tab active" data-tab="tree">Tree</div>
+            <div class="tab" data-tab="json">JSON</div>
+            <div class="tab" data-tab="meta">Metadata</div>
+          </div>
+          <input
+            type="text"
+            id="search"
+            class="search"
+            placeholder="Search field/value..."
+          />
+          <button id="btnExpand">Expand All</button>
+          <button id="btnCollapse">Collapse</button>
+          <button id="btnCopyJson">Copy JSON</button>
+        </div>
+        <div class="panel-body" id="output">
+          <div class="empty">Output akan muncul di sini setelah parsing.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+      /* ========================================================================
+       *  Go-struct (%+v output) parser
+       * ====================================================================== */
+      class GoStructParser {
+        constructor(input) {
+          this.s = input;
+          this.pos = 0;
+        }
+        peek(o = 0) {
+          return this.s[this.pos + o];
+        }
+        eof() {
+          return this.pos >= this.s.length;
+        }
+        match(str) {
+          return this.s.substr(this.pos, str.length) === str;
+        }
+
+        parse() {
+          this.skipSpaces();
+          const v = this.parseValue();
+          return v;
+        }
+
+        skipSpaces() {
+          while (this.peek() === " ") this.pos++;
+        }
+
+        parseValue() {
+          if (this.peek() === "{") return this.parseStruct();
+          if (this.peek() === "[") return this.parseSlice();
+          if (this.match("map[")) return this.parseMap();
+          return this.parseScalar();
+        }
+
+        parseStruct() {
+          this.pos++; // skip {
+          const obj = {};
+          let i = 0;
+          while (!this.eof() && this.peek() !== "}") {
+            this.skipSpaces();
+            if (this.peek() === "}") break;
+            // read field name (until ':')
+            const nameStart = this.pos;
+            while (!this.eof() && this.peek() !== ":" && this.peek() !== "}")
+              this.pos++;
+            if (this.peek() === "}") break;
+            if (this.eof())
+              throw new Error(
+                "Unexpected EOF parsing struct field name at " + nameStart,
+              );
+            const fieldName = this.s.substring(nameStart, this.pos) || "_" + i;
+            this.pos++; // skip :
+            const value = this.parseValue();
+            obj[fieldName] = value;
+            i++;
+          }
+          if (this.peek() === "}") this.pos++;
+          return obj;
+        }
+
+        parseSlice() {
+          this.pos++; // skip [
+          const arr = [];
+          while (!this.eof() && this.peek() !== "]") {
+            // skip leading spaces between elements
+            this.skipSpaces();
+            if (this.peek() === "]") break;
+            const v = this.parseValue();
+            arr.push(v);
+          }
+          if (this.peek() === "]") this.pos++;
+          return arr;
+        }
+
+        parseMap() {
+          this.pos += 4; // skip 'map['
+          const obj = {};
+          let i = 0;
+          while (!this.eof() && this.peek() !== "]") {
+            this.skipSpaces();
+            if (this.peek() === "]") break;
+            // read key — until ':' or ']'
+            const keyStart = this.pos;
+            while (!this.eof() && this.peek() !== ":" && this.peek() !== "]")
+              this.pos++;
+            if (this.peek() === "]") break;
+            const key = this.s.substring(keyStart, this.pos) || "_" + i;
+            this.pos++; // skip :
+            const value = this.parseValue();
+            obj[key] = value;
+            i++;
+          }
+          if (this.peek() === "]") this.pos++;
+          return obj;
+        }
+
+        /**
+         * Scalar reading: stop at next-field marker (' Identifier:'),
+         * or at '}' / ']' that look like real container terminators.
+         * Continues reading through '}' / ']' if they appear to be inside a string
+         * (e.g., encoded polylines).
+         */
+        parseScalar() {
+          const start = this.pos;
+          while (!this.eof()) {
+            const c = this.s[this.pos];
+            if (c === " " && this.isNextFieldAt(this.pos)) break;
+            if (c === "}" || c === "]") {
+              if (this.looksLikeRealCloser(this.pos)) break;
+            }
+            this.pos++;
+          }
+          const raw = this.s.substring(start, this.pos);
+          return this.coerceScalar(raw);
+        }
+
+        /** True if pos points to ' ' followed by [A-Z]\w* ':' — Go field separator. */
+        isNextFieldAt(pos) {
+          if (this.s[pos] !== " ") return false;
+          let p = pos + 1;
+          if (p >= this.s.length) return false;
+          if (!/[A-Z_]/.test(this.s[p])) return false;
+          p++;
+          while (p < this.s.length && /[A-Za-z0-9_]/.test(this.s[p])) p++;
+          return this.s[p] === ":";
+        }
+
+        /**
+         * Heuristic: a '}' or ']' is a real closer if followed by:
+         *   - end-of-string
+         *   - another '}' or ']' (cascading closers)
+         *   - ' ' + next-field of parent struct
+         *   - ' {' or ' [' (next element in a slice)
+         * Otherwise treat as part of a scalar string (polyline-like content).
+         */
+        looksLikeRealCloser(pos) {
+          const next = this.s[pos + 1];
+          if (next === undefined) return true;
+          if (next === "}" || next === "]") return true;
+          if (next === " ") {
+            const after = this.s[pos + 2];
+            if (after === undefined) return true;
+            if (after === "{" || after === "[") return true; // next slice element
+            if (this.isNextFieldAt(pos + 1)) return true; // next field of outer
+            return false;
+          }
+          return false;
+        }
+
+        coerceScalar(v) {
+          if (v === "") return "";
+          if (v === "true") return true;
+          if (v === "false") return false;
+          if (v === "<nil>" || v === "nil" || v === "null") return null;
+          if (/^-?\d+$/.test(v)) {
+            // preserve very large ints as string to avoid precision loss
+            if (v.length > 15) return v;
+            return parseInt(v, 10);
+          }
+          if (/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
+          return v;
+        }
+      }
+
+      /* ========================================================================
+       *  Top-level format detector + extractor
+       * ====================================================================== */
+      /**
+       * Forgiving JSON parser — handles logs where invalid backslash escapes
+       * leaked through (e.g., '\F' inside a polyline). Tries strict parse first,
+       * then escapes lone backslashes and retries.
+       */
+      function forgivingJsonParse(s) {
+        try {
+          return JSON.parse(s);
+        } catch (_) {}
+        // Escape any backslash NOT followed by a valid JSON escape char
+        const fixed = s.replace(/\\(?!["\\\/bfnrtu])/g, "\\\\");
+        return JSON.parse(fixed);
+      }
+
+      /**
+       * Detect & decode "escaped JSON" — content where every quote is `\"`
+       * (i.e. the JSON was stringified and inserted into another string,
+       * or copied from a tool that escaped the quotes).
+       * Unescape repeatedly until it stabilizes (handles double-escaped too).
+       */
+      function tryEscapedJson(s) {
+        if (!/\\"/.test(s)) return null;
+        if (!/^[{[]/.test(s.trim())) return null;
+
+        let cur = s;
+        let depth = 0;
+        // up to 3 levels of escaping
+        while (depth < 3 && /\\"/.test(cur)) {
+          const unescaped = cur.replace(/\\(.)/g, (m, c) => {
+            switch (c) {
+              case '"':
+                return '"';
+              case "\\":
+                return "\\";
+              case "/":
+                return "/";
+              case "n":
+                return "\n";
+              case "t":
+                return "\t";
+              case "r":
+                return "\r";
+              case "b":
+                return "\b";
+              case "f":
+                return "\f";
+              default:
+                return m;
+            }
+          });
+          if (unescaped === cur) break;
+          cur = unescaped;
+          depth++;
+        }
+        try {
+          const obj = forgivingJsonParse(cur);
+          if (obj && typeof obj === "object") return obj;
+        } catch (_) {}
+        return null;
+      }
+
+      function detectAndParse(raw) {
+        const trimmed = raw.trim();
+        if (!trimmed) throw new Error("Input kosong");
+
+        // Case A: container log line:  <timestamp> stdout F <payload>
+        // Strip the prefix if present.
+        const containerRe =
+          /^\d{4}-\d{2}-\d{2}T[\d:.+\-Z]+\s+(stdout|stderr)\s+[FP]\s+/;
+        let stripped = trimmed;
+        let containerStripped = false;
+        if (containerRe.test(stripped)) {
+          stripped = stripped.replace(containerRe, "");
+          containerStripped = true;
+        }
+
+        // Case B: outer JSON wrapper from a logger: {"message":"...","severity":"..."}
+        // Try forgiving parse first
+        let parsedJson = null;
+        try {
+          parsedJson = forgivingJsonParse(stripped);
+        } catch (_) {}
+
+        if (parsedJson && typeof parsedJson === "object") {
+          // Maybe message field contains an inner Go-struct or JSON
+          const inner = pickInnerPayload(parsedJson);
+          if (inner !== null) {
+            return {
+              format: containerStripped ? "mixed" : "wrapped",
+              value: inner.value,
+              wrapper: parsedJson,
+              source: inner.source,
+            };
+          }
+          return {
+            format: containerStripped ? "mixed" : "json",
+            value: parsedJson,
+          };
+        }
+
+        // Case C: escaped JSON ({\"key\":\"value\"} style — quotes pre-escaped)
+        const escapedDecoded = tryEscapedJson(stripped);
+        if (escapedDecoded) {
+          return { format: "escaped-json", value: escapedDecoded };
+        }
+
+        // Case D: raw payload — could be Go struct or messy text
+        // If starts with '{' but isn't valid JSON, parse as Go struct
+        if (stripped.startsWith("{")) {
+          const goVal = new GoStructParser(stripped).parse();
+          return { format: "go", value: goVal };
+        }
+
+        // Case D: log line with embedded [REQUEST]={...} etc.
+        const extracted = extractGoStructsFromText(stripped);
+        if (extracted) return { format: "go-embedded", value: extracted };
+
+        throw new Error(
+          "Format tidak dikenali — bukan JSON, bukan Go struct dump.",
+        );
+      }
+
+      /** From a logger-wrapper JSON, try to find the actual interesting payload. */
+      function pickInnerPayload(obj) {
+        // Common log fields that might hold the real message
+        const keys = ["message", "msg", "log", "body", "data", "payload"];
+        for (const k of keys) {
+          if (typeof obj[k] === "string") {
+            const inner = obj[k];
+            // Try JSON first (forgiving)
+            try {
+              const j = forgivingJsonParse(inner);
+              if (j && typeof j === "object")
+                return { value: j, source: `${k} (JSON)` };
+            } catch (_) {}
+            // Try escaped JSON ({\"key\":\"value\"})
+            const esc = tryEscapedJson(inner);
+            if (esc) return { value: esc, source: `${k} (escaped JSON)` };
+            // Try extracting Go struct(s)
+            const ex = extractGoStructsFromText(inner);
+            if (ex) return { value: ex, source: `${k} (Go struct)` };
+          }
+        }
+        return null;
+      }
+
+      /**
+       * Find substrings like "[LABEL]={...}" or "...= {..." or trace_id = '...'
+       * Returns an object combining all found pieces for readability.
+       */
+      function extractGoStructsFromText(text) {
+        const result = {};
+        let foundAny = false;
+
+        // 1) Bracketed labels: [LABEL]={...}
+        const labelRe = /\[([A-Z_][A-Z0-9_]*)\]=/g;
+        const labels = [];
+        let m;
+        while ((m = labelRe.exec(text)) !== null) {
+          labels.push({
+            name: m[1],
+            start: m.index,
+            valueStart: m.index + m[0].length,
+          });
+        }
+        for (let i = 0; i < labels.length; i++) {
+          const lbl = labels[i];
+          const end = i + 1 < labels.length ? labels[i + 1].start : text.length;
+          const segment = text.substring(lbl.valueStart, end).trim();
+          if (segment.startsWith("{")) {
+            try {
+              const parser = new GoStructParser(segment);
+              const v = parser.parse();
+              result[lbl.name] = v;
+              foundAny = true;
+            } catch (e) {
+              result[lbl.name] = { _error: e.message, _raw: segment };
+            }
+          } else {
+            // Free-form — split by ", " on key = 'value' pairs
+            const pairs = parseQuotedPairs(segment);
+            if (Object.keys(pairs).length) {
+              result[lbl.name] = pairs;
+              foundAny = true;
+            } else {
+              result[lbl.name] = segment;
+              foundAny = true;
+            }
+          }
+        }
+
+        // 2) Pull out level=info ts=... caller=... prefix as a header (if no labels found)
+        if (!foundAny) {
+          const headerPairs = parseEqualsPairs(text);
+          if (Object.keys(headerPairs).length) {
+            result._meta = headerPairs;
+            foundAny = true;
+          }
+        }
+
+        return foundAny ? result : null;
+      }
+
+      /** Parse "key = 'value', key = 'value'" style segments. */
+      function parseQuotedPairs(s) {
+        const out = {};
+        const re = /([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*'([^']*)'/g;
+        let m;
+        while ((m = re.exec(s)) !== null) out[m[1]] = m[2];
+        return out;
+      }
+
+      /** Parse "key=value key=value" with bare values. */
+      function parseEqualsPairs(s) {
+        const out = {};
+        const re = /([a-zA-Z_][a-zA-Z0-9_.]*)=([^\s]+)/g;
+        let m;
+        while ((m = re.exec(s)) !== null) out[m[1]] = m[2];
+        return out;
+      }
+
+      /* ========================================================================
+       *  Metadata harvesting (trace_id, request_id, etc.)
+       * ====================================================================== */
+      const META_KEYS = [
+        "trace_id",
+        "traceId",
+        "traceID",
+        "request_id",
+        "requestId",
+        "RequestId",
+        "requestID",
+        "partner_id",
+        "partnerId",
+        "PartnerId",
+        "user_id",
+        "userId",
+        "UserId",
+        "order_id",
+        "orderId",
+        "OrderId",
+        "OrderNo",
+        "order_no",
+        "booking_id",
+        "bookingId",
+        "BookingId",
+        "BookingNo",
+        "booking_no",
+        "customer_name",
+        "CustomerName",
+        "customer_phone",
+        "CustomerPhone",
+        "merchant_code",
+        "MerchantCode",
+        "channel",
+        "channel_id",
+        "ChannelId",
+        "created_by",
+        "createdBy",
+        "CreatedBy",
+        "severity",
+        "level",
+      ];
+
+      function harvestMetadata(value, prefix = "") {
+        const out = {};
+        function walk(v, path) {
+          if (v === null || v === undefined) return;
+          if (Array.isArray(v)) {
+            v.forEach((x, i) => walk(x, `${path}[${i}]`));
+            return;
+          }
+          if (typeof v === "object") {
+            for (const k of Object.keys(v)) {
+              if (
+                META_KEYS.includes(k) &&
+                (typeof v[k] === "string" || typeof v[k] === "number") &&
+                v[k] !== "" &&
+                v[k] !== 0
+              ) {
+                // dedupe: keep the first non-empty
+                if (!out[k])
+                  out[k] = { value: v[k], path: path ? `${path}.${k}` : k };
+              }
+              walk(v[k], path ? `${path}.${k}` : k);
+            }
+          }
+        }
+        walk(value, prefix);
+        return out;
+      }
+
+      /* ========================================================================
+       *  Tree rendering
+       * ====================================================================== */
+      function renderTree(value, container) {
+        container.innerHTML = "";
+        const root = document.createElement("div");
+        root.className = "tree";
+        root.appendChild(renderNode(value, null, true));
+        container.appendChild(root);
+      }
+
+      function renderNode(value, key, isRoot = false) {
+        const node = document.createElement("div");
+        node.className = "node" + (isRoot ? " root" : "");
+
+        const row = document.createElement("div");
+        row.className = "row";
+        node.appendChild(row);
+
+        const isObj = value !== null && typeof value === "object";
+        const isArr = Array.isArray(value);
+
+        if (isObj) {
+          const toggle = document.createElement("span");
+          toggle.className = "toggle";
+          toggle.textContent = "▼";
+          toggle.addEventListener("click", () => {
+            node.classList.toggle("collapsed");
+            toggle.textContent = node.classList.contains("collapsed")
+              ? "▶"
+              : "▼";
+          });
+          row.appendChild(toggle);
+
+          if (key !== null) {
+            const k = document.createElement("span");
+            k.className = "key";
+            k.textContent = key;
+            row.appendChild(k);
+            const colon = document.createElement("span");
+            colon.className = "punct";
+            colon.textContent = ": ";
+            row.appendChild(colon);
+          }
+          const open = document.createElement("span");
+          open.className = "punct";
+          open.textContent = isArr ? "[" : "{";
+          row.appendChild(open);
+
+          // preview when collapsed
+          const preview = document.createElement("span");
+          preview.className = "preview";
+          const count = isArr ? value.length : Object.keys(value).length;
+          preview.textContent = ` ${count} ${isArr ? "items" : "fields"} `;
+          row.appendChild(preview);
+          const closeInline = document.createElement("span");
+          closeInline.className = "preview punct";
+          closeInline.textContent = isArr ? "]" : "}";
+          row.appendChild(closeInline);
+
+          // copy button
+          const copyBtn = document.createElement("span");
+          copyBtn.className = "copy-btn";
+          copyBtn.textContent = "copy";
+          copyBtn.title = "Copy this subtree as JSON";
+          copyBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            copyToClipboard(JSON.stringify(value, null, 2));
+          });
+          row.appendChild(copyBtn);
+
+          // children
+          const children = document.createElement("div");
+          children.className = "children";
+          const entries = isArr
+            ? value.map((v, i) => [i, v])
+            : Object.entries(value);
+          if (entries.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "meta";
+            empty.textContent = isArr ? "(empty array)" : "(empty object)";
+            empty.style.paddingLeft = "16px";
+            children.appendChild(empty);
+          } else {
+            for (const [k, v] of entries) {
+              children.appendChild(renderNode(v, String(k)));
+            }
+          }
+          node.appendChild(children);
+
+          const close = document.createElement("div");
+          close.className = "punct";
+          close.style.paddingLeft = "2px";
+          close.textContent = isArr ? "]" : "}";
+          node.appendChild(close);
+        } else {
+          // leaf
+          const spacer = document.createElement("span");
+          spacer.className = "toggle";
+          spacer.textContent = " ";
+          row.appendChild(spacer);
+          if (key !== null) {
+            const k = document.createElement("span");
+            k.className = "key";
+            k.textContent = key;
+            row.appendChild(k);
+            const colon = document.createElement("span");
+            colon.className = "punct";
+            colon.textContent = ": ";
+            row.appendChild(colon);
+          }
+          const v = document.createElement("span");
+          if (value === null) {
+            v.className = "null";
+            v.textContent = "null";
+          } else if (typeof value === "boolean") {
+            v.className = "bool";
+            v.textContent = String(value);
+          } else if (typeof value === "number") {
+            v.className = "num";
+            v.textContent = String(value);
+          } else {
+            v.className = "str";
+            v.textContent = `"${String(value)}"`;
+          }
+          row.appendChild(v);
+
+          const copyBtn = document.createElement("span");
+          copyBtn.className = "copy-btn";
+          copyBtn.textContent = "copy";
+          copyBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            copyToClipboard(
+              typeof value === "string" ? value : JSON.stringify(value),
+            );
+          });
+          row.appendChild(copyBtn);
+        }
+        return node;
+      }
+
+      /* ========================================================================
+       *  JSON pretty-print with syntax highlighting
+       * ====================================================================== */
+      function highlightJson(json) {
+        return json
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(
+            /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(\.\d+)?([eE][+\-]?\d+)?)/g,
+            (m) => {
+              let cls = "num";
+              if (/^"/.test(m)) cls = /:$/.test(m) ? "key" : "str";
+              else if (/true|false/.test(m)) cls = "bool";
+              else if (/null/.test(m)) cls = "null";
+              return `<span class="${cls}">${m}</span>`;
+            },
+          );
+      }
+
+      /* ========================================================================
+       *  Metadata cards rendering
+       * ====================================================================== */
+      function renderMetadata(meta, container) {
+        container.innerHTML = "";
+        const wrap = document.createElement("div");
+        wrap.className = "meta-cards";
+        const keys = Object.keys(meta);
+        if (keys.length === 0) {
+          container.innerHTML =
+            '<div class="empty">Tidak ada metadata umum (trace_id, request_id, dll) ditemukan.</div>';
+          return;
+        }
+        for (const k of keys) {
+          const card = document.createElement("div");
+          card.className = "meta-card";
+          const lbl = document.createElement("div");
+          lbl.className = "lbl";
+          lbl.textContent = k;
+          const val = document.createElement("div");
+          val.className = "val";
+          val.textContent = String(meta[k].value);
+          val.title = "path: " + meta[k].path;
+          val.style.cursor = "pointer";
+          val.addEventListener("click", () =>
+            copyToClipboard(String(meta[k].value)),
+          );
+          card.appendChild(lbl);
+          card.appendChild(val);
+          wrap.appendChild(card);
+        }
+        container.appendChild(wrap);
+      }
+
+      /* ========================================================================
+       *  Search / highlight
+       * ====================================================================== */
+      function applySearch(query) {
+        const q = query.trim().toLowerCase();
+        const tree = document.querySelector(".tree");
+        if (!tree) return;
+        const rows = tree.querySelectorAll(".row");
+        rows.forEach((r) => r.classList.remove("match"));
+        if (!q) return;
+        rows.forEach((r) => {
+          if (r.textContent.toLowerCase().includes(q)) {
+            r.classList.add("match");
+            // ensure ancestors are expanded
+            let p = r.parentElement;
+            while (p && p.classList) {
+              if (
+                p.classList.contains("node") &&
+                p.classList.contains("collapsed")
+              ) {
+                p.classList.remove("collapsed");
+                const t = p.querySelector(":scope > .row > .toggle");
+                if (t) t.textContent = "▼";
+              }
+              p = p.parentElement;
+            }
+          }
+        });
+      }
+
+      /* ========================================================================
+       *  Session management (Chrome-style tabs)
+       * ====================================================================== */
+      const STORAGE_KEY = "logParserSessions";
+      let sessions = [];
+      let activeId = null;
+
+      function newSessionObj() {
+        return {
+          id: "s_" + Date.now() + "_" + Math.floor(Math.random() * 1e6),
+          label: "", // user-editable label (empty = auto-derive)
+          autoLabel: "", // derived from parsed data
+          input: "",
+          value: null,
+          format: null,
+          wrapper: null,
+          source: null,
+          status: { ok: null, msg: "Siap. Paste log lalu klik Parse." },
+          outTab: "tree",
+          search: "",
+          error: false,
+        };
+      }
+
+      function getSession(id) {
+        return sessions.find((s) => s.id === id);
+      }
+      function activeSession() {
+        return getSession(activeId);
+      }
+
+      function deriveLabel(s) {
+        if (s.label) return s.label;
+        if (s.autoLabel) return s.autoLabel;
+        // fallback: numbered tab
+        const i = sessions.indexOf(s);
+        return "Tab " + (i + 1);
+      }
+
+      const LABEL_PRIORITY = [
+        "BookingNo",
+        "booking_no",
+        "booking_id",
+        "OrderNo",
+        "order_no",
+        "order_id",
+        "RequestId",
+        "request_id",
+        "TripId",
+        "trace_id",
+      ];
+
+      function autoLabelFor(s) {
+        if (!s.value) return "";
+        // Search in parsed value AND wrapper for a useful identifier
+        const haystacks = [s.value, s.wrapper].filter(Boolean);
+        for (const key of LABEL_PRIORITY) {
+          for (const h of haystacks) {
+            const found = findFirst(h, key);
+            if (found) {
+              const v = String(found);
+              return (
+                key.replace(/_/g, "").substring(0, 6) +
+                ":" +
+                (v.length > 14 ? v.substring(0, 14) + "…" : v)
+              );
+            }
+          }
+        }
+        return "";
+      }
+
+      function findFirst(value, targetKey) {
+        let result = null;
+        function walk(v) {
+          if (result !== null) return;
+          if (v === null || v === undefined) return;
+          if (Array.isArray(v)) {
+            for (const x of v) walk(x);
+            return;
+          }
+          if (typeof v === "object") {
+            for (const k of Object.keys(v)) {
+              if (result !== null) return;
+              if (
+                k === targetKey &&
+                (typeof v[k] === "string" || typeof v[k] === "number") &&
+                v[k] !== "" &&
+                v[k] !== 0
+              ) {
+                result = v[k];
+                return;
+              }
+              walk(v[k]);
+            }
+          }
+        }
+        walk(value);
+        return result;
+      }
+
+      function persist() {
+        try {
+          // Persist only inputs + labels to keep storage small; re-parse on load
+          const data = {
+            activeId,
+            sessions: sessions.map((s) => ({
+              id: s.id,
+              label: s.label,
+              input: s.input,
+              outTab: s.outTab,
+              search: s.search,
+            })),
+          };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        } catch (e) {
+          /* ignore quota errors */
+        }
+      }
+      const persistDebounced = (() => {
+        let t = null;
+        return () => {
+          clearTimeout(t);
+          t = setTimeout(persist, 300);
+        };
+      })();
+
+      function restore() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (!raw) return false;
+          const data = JSON.parse(raw);
+          if (!data.sessions || !data.sessions.length) return false;
+          sessions = data.sessions.map((s) => ({
+            ...newSessionObj(),
+            ...s,
+            value: null,
+            wrapper: null,
+            format: null,
+          }));
+          activeId =
+            data.activeId && getSession(data.activeId)
+              ? data.activeId
+              : sessions[0].id;
+          // Re-parse each session that has input
+          for (const s of sessions) {
+            if (s.input && s.input.trim()) {
+              try {
+                const r = detectAndParse(s.input);
+                s.value = r.value;
+                s.format = r.format;
+                s.wrapper = r.wrapper || null;
+                s.source = r.source || null;
+                s.autoLabel = autoLabelFor(s);
+                s.status = {
+                  ok: true,
+                  msg: `Parsed OK — format: ${r.format}${r.source ? " / " + r.source : ""}`,
+                };
+              } catch (_) {
+                s.error = true;
+              }
+            }
+          }
+          return true;
+        } catch (e) {
+          return false;
+        }
+      }
+
+      function renderSessionBar() {
+        const bar = document.getElementById("sessionBar");
+        // remove all .session-tab children
+        bar.querySelectorAll(".session-tab").forEach((n) => n.remove());
+        const newBtn = bar.querySelector("#btnNewTab");
+        for (const s of sessions) {
+          const tab = document.createElement("div");
+          tab.className =
+            "session-tab" +
+            (s.id === activeId ? " active" : "") +
+            (s.value ? " parsed" : "") +
+            (s.error ? " error" : "");
+          tab.dataset.id = s.id;
+
+          const dot = document.createElement("span");
+          dot.className = "tab-dot";
+          tab.appendChild(dot);
+
+          const label = document.createElement("span");
+          label.className = "tab-label";
+          label.textContent = deriveLabel(s);
+          label.title = "Double-click untuk rename";
+          tab.appendChild(label);
+
+          const close = document.createElement("span");
+          close.className = "tab-close";
+          close.textContent = "×";
+          close.title = "Close tab";
+          close.addEventListener("click", (e) => {
+            e.stopPropagation();
+            closeSession(s.id);
+          });
+          tab.appendChild(close);
+
+          tab.addEventListener("click", () => switchSession(s.id));
+          tab.addEventListener("dblclick", (e) => {
+            e.preventDefault();
+            label.contentEditable = "true";
+            label.focus();
+            // select text
+            const range = document.createRange();
+            range.selectNodeContents(label);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            const finish = () => {
+              label.contentEditable = "false";
+              s.label = label.textContent.trim();
+              persistDebounced();
+              renderSessionBar();
+            };
+            label.addEventListener("blur", finish, { once: true });
+            label.addEventListener("keydown", (ev) => {
+              if (ev.key === "Enter") {
+                ev.preventDefault();
+                label.blur();
+              }
+              if (ev.key === "Escape") {
+                label.textContent = deriveLabel(s);
+                label.blur();
+              }
+            });
+          });
+
+          bar.insertBefore(tab, newBtn);
+        }
+      }
+
+      function captureFromUI(s) {
+        if (!s) return;
+        s.input = document.getElementById("input").value;
+        const activeOutTab = document.querySelector(".panel-head .tab.active");
+        if (activeOutTab) s.outTab = activeOutTab.dataset.tab;
+        s.search = document.getElementById("search").value;
+      }
+
+      function loadIntoUI(s) {
+        document.getElementById("input").value = s.input || "";
+        document.getElementById("search").value = s.search || "";
+        // out-tab
+        document.querySelectorAll(".panel-head .tab").forEach((t) => {
+          t.classList.toggle("active", t.dataset.tab === s.outTab);
+        });
+        // status
+        const status = document.getElementById("status");
+        status.className =
+          "status" +
+          (s.status.ok === true ? " ok" : s.status.ok === false ? " err" : "");
+        status.textContent = s.status.msg;
+        // badge
+        const badge = document.getElementById("formatBadge");
+        badge.className = "badge";
+        if (!s.format) {
+          badge.textContent = "auto-detect";
+        } else if (s.format === "json") {
+          badge.textContent = "JSON";
+          badge.classList.add("json");
+        } else if (s.format === "escaped-json") {
+          badge.textContent = "escaped JSON";
+          badge.classList.add("json");
+        } else if (s.format === "go" || s.format === "go-embedded") {
+          badge.textContent = "Go struct";
+          badge.classList.add("go");
+        } else if (s.format === "wrapped") {
+          badge.textContent = "JSON wrapper + " + (s.source || "inner");
+          badge.classList.add("mixed");
+        } else if (s.format === "mixed") {
+          badge.textContent = "container + " + (s.source || "JSON");
+          badge.classList.add("mixed");
+        }
+        // output
+        if (s.value) {
+          renderActiveTab();
+        } else {
+          document.getElementById("output").innerHTML =
+            '<div class="empty">Output akan muncul di sini setelah parsing.</div>';
+        }
+      }
+
+      function switchSession(id) {
+        if (id === activeId) return;
+        captureFromUI(activeSession());
+        activeId = id;
+        loadIntoUI(activeSession());
+        renderSessionBar();
+        persistDebounced();
+      }
+
+      function newSession(autoActivate = true) {
+        const s = newSessionObj();
+        sessions.push(s);
+        if (autoActivate) {
+          captureFromUI(activeSession());
+          activeId = s.id;
+          loadIntoUI(s);
+        }
+        renderSessionBar();
+        persistDebounced();
+        return s;
+      }
+
+      function closeSession(id) {
+        const idx = sessions.findIndex((s) => s.id === id);
+        if (idx === -1) return;
+        sessions.splice(idx, 1);
+        if (sessions.length === 0) {
+          // always keep at least one
+          newSession(true);
+          return;
+        }
+        if (activeId === id) {
+          // pick neighbor
+          const nextIdx = Math.min(idx, sessions.length - 1);
+          activeId = sessions[nextIdx].id;
+          loadIntoUI(activeSession());
+        }
+        renderSessionBar();
+        persistDebounced();
+      }
+
+      /* ========================================================================
+       *  Parse + render (now session-aware)
+       * ====================================================================== */
+      function doParse() {
+        const s = activeSession();
+        if (!s) return;
+        captureFromUI(s);
+        const raw = s.input;
+        const status = document.getElementById("status");
+        const badge = document.getElementById("formatBadge");
+        try {
+          const result = detectAndParse(raw);
+          s.value = result.value;
+          s.format = result.format;
+          s.wrapper = result.wrapper || null;
+          s.source = result.source || null;
+          s.error = false;
+          s.autoLabel = autoLabelFor(s);
+
+          badge.className = "badge";
+          if (result.format === "json") {
+            badge.textContent = "JSON";
+            badge.classList.add("json");
+          } else if (result.format === "escaped-json") {
+            badge.textContent = "escaped JSON";
+            badge.classList.add("json");
+          } else if (
+            result.format === "go" ||
+            result.format === "go-embedded"
+          ) {
+            badge.textContent = "Go struct";
+            badge.classList.add("go");
+          } else if (result.format === "wrapped") {
+            badge.textContent = "JSON wrapper + " + (result.source || "inner");
+            badge.classList.add("mixed");
+          } else if (result.format === "mixed") {
+            badge.textContent = "container + " + (result.source || "JSON");
+            badge.classList.add("mixed");
+          }
+
+          s.status = {
+            ok: true,
+            msg: `Parsed OK — format: ${result.format}${result.source ? " / " + result.source : ""}`,
+          };
+          status.className = "status ok";
+          status.textContent = s.status.msg;
+
+          renderActiveTab();
+          renderSessionBar();
+          persistDebounced();
+        } catch (e) {
+          s.error = true;
+          s.value = null;
+          s.status = { ok: false, msg: "Parse error: " + e.message };
+          status.className = "status err";
+          status.textContent = s.status.msg;
+          renderSessionBar();
+          persistDebounced();
+        }
+      }
+
+      function renderActiveTab() {
+        const s = activeSession();
+        if (!s || !s.value) return;
+        const out = document.getElementById("output");
+        const activeOutTab = document.querySelector(".panel-head .tab.active");
+        const active = activeOutTab ? activeOutTab.dataset.tab : "tree";
+        if (active === "tree") {
+          renderTree(s.value, out);
+        } else if (active === "json") {
+          out.innerHTML =
+            '<pre class="json-raw">' +
+            highlightJson(JSON.stringify(s.value, null, 2)) +
+            "</pre>";
+        } else if (active === "meta") {
+          const meta = harvestMetadata(s.value);
+          if (s.wrapper) Object.assign(meta, harvestMetadata(s.wrapper));
+          renderMetadata(meta, out);
+        }
+        applySearch(document.getElementById("search").value);
+      }
+
+      function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(() => showToast("Copied!"));
+      }
+
+      function showToast(msg) {
+        const t = document.getElementById("toast");
+        t.textContent = msg;
+        t.classList.add("show");
+        clearTimeout(showToast._tid);
+        showToast._tid = setTimeout(() => t.classList.remove("show"), 1200);
+      }
+
+      /* ---- Sample data ---- */
+      const SAMPLE_1 = `2026-05-08T13:21:09.196205418+07:00 stdout F {"message": "level=info ts=2026-05-08T06:21:09.196146453Z caller=add_booking.go:44 [INFO]=Upper AddBooking [REQUEST]={RequestId:ca342bc8-6875-45d4-8b5a-70966f15c2b4 BookingId: BookingNo: BookingType: BookingSource: ChannelId:0 BookingLabel: Currency:IDR MerchantName: MerchantCode: MerchantPhone: CustomerName:Tedt CustomerPhone: CustomerEmail: Orders:[{Order:{OrderId:0 OrderNo: OrderType:0 PickupTime: Timezone:0 NumberTaxi:1 PaxNo:0 Airport:false ChannelId:0 Remark: Instruction: Currency: Fare:0 Extra:0 Tip:0 TariffType:0 FixedFare:0 RequestId:dbefff67-dd2d-4764-9074-b8d4fa0e2efc AreaId: ServiceId:0 FleetServiceId:0 BasePackageId:0 PackageId:0 TariffId:0 Status:0 CreatedBy: CreatedAt:0 UpdatedBy: UpdatedAt:0 QuoteId: PickupZone: DropoffZone: OrderCategory:0 CreatorCode: ExecutorCode: BookingSource: SalesName: VehicleClassId:0 ServiceCoverage: TripType:0 PreferredDriver: PreferredVehicle: MerchantId: BookingId: MerchantName: MerchantCode: MerchantPhone: DestinationCode: RentDuration: RentUnit: CashReceiveToll:0 ReturnToll:0 PriceUsd:0 RateUsd:0 Surcharge:0 Price:0 TotalPrice:0 ServiceItemId:2787} Customers:[{Type:3 Name:Tedt Phone: CallbackPhone: Email: PartnerCustId: IsCallback:0}] Route:{Locations:[{Sequence:0 Type:0 Latitude:-6.246203941952657 Longitude:106.8854457059804 Address:KCIC Station, Jl. Akses Kereta Cepat Halim Perdanakusumah, Desa/Kelurahan Halim Perdana Kusuma, Kec. Makasar, Kota Adm. Jakarta Timur, Provinsi DKI Jakarta. 13610 Remark: PickupCustomers:[] DropCustomers:[] RelCustomers:[]} {Sequence:0 Type:0 Latitude:-6.231255233548048 Longitude:106.8877413729206 Address:Jalan Cakra Wijaya IV, Jalan Cakra Wijaya IV, Jatinegara, Jakarta Timur, Jawa, 13420 (-6.231255, 106.887741) Remark: PickupCustomers:[] DropCustomers:[] RelCustomers:[]}] RoutePlan:{OrderId:0 RouteToken: RouteType:1 EncodedPolyline:x}be@y\`kkSTEF\\FXl@MN@ZdBJt@LdAIRoC\\d@dDVdAZxA@VWrFG|@Cp@SzEGd@KTORiBlBKJa@\`@uAdAUHa@Li@F[BuBDu@Aq@M{@Yo@IOj@VPbD|B\`@VNH@VITYP]MKE[MYI}@WIC{C_AuBo@o@Oy@Q]KWEc@MCA[G[Ic@IYGDi@?k@IiBAU?e@CeBCs@OeD?Q?CA]EgCAeA?_@GQEiBAQCiAEgAAQ?a@IaFEkBUwIASAqAA_BeCA}@Bi@RaATc@JYFiABQA{@GMEgAUs@UOIQK{D}BqAs@UOqA_AMKSHcAxBWj@aD\`FSKg@Y_@SoAs@iAm@QToBbDdAp@fAcB Timestamp:0}} Payments:[{Type:6 Currency:IDR Amount:0}] Promos:[] Partner:{CustomerId: OrderId:outlet-kcic-1-17782211483514d164e2a79902 ServiceId: ExtraInfo_1: ExtraInfo_2:} Fares:[{Type:6 Currency:IDR Amount:200000 Remark: PromoIndex:0} {Type:10 Currency:IDR Amount:2000 Remark: PromoIndex:0} {Type:12 Currency:IDR Amount:200000 Remark: PromoIndex:0}] OrderingLocation:{Latitude:-6.246203941952657 Longitude:106.8854457059804 Address:Jl. Akses Kereta Cepat Halim Perdanakusumah, Desa/Kelurahan Halim Perdana Kusuma, Kec. Makasar, Kota Adm. Jakarta Timur, Provinsi DKI Jakarta. 13610} Notes:[{Instruction: Remark: Type:200 Value:431163} {Instruction: Remark: Type:201 Value:true} {Instruction: Remark: Type:100 Value:ARGO} {Instruction: Remark: Type:110 Value:0} {Instruction: Remark: Type:111 Value:H}] OrderTags:[] TripId:INQ-de8ea265-fdd2-4346-81f0-18cc09a5c569 OrderAttributes:map[] OrderBilling:{Id:0 OrderId:0 PaymentMethod: TotalAmount:0 PaidAmount:0 UnpaidAmount:0 Items:[] Attributes:[]} Settlements:[] MultipleService:{DispatchPriority:0 ServiceOptions:[]}}] Billing:{Id:0 BookingId: PaymentScheme: PaymentMethod: TotalAmount:0 PaidAmount:0 UnpaidAmount:0 Items:[] Attributes:[]} CreatedAt:0 CreatedBy: UpdatedAt:0 UpdatedBy: IsNotSend:false} [BASIC]=trace_id = '2ee7236e-1796-4b00-89c6-875e55a07cf8' , request_id = 'de9312b3-85bc-4e32-bed5-49ecba118ed8' , partner_id = '1fd0b968-b441-48a6-9b7a-ededaaf961c7' , user_id = 'partner.outlet'", "severity": "info"}`;
+
+      const SAMPLE_2 = `{"header":{"creator_code":"OJ","executor_code":"HO","order_area":"JKT","order_no":"1104660308","order_type":"TUNAI","order_date":{"seconds":1778221269},"customer_name":"Tedt","channel":"BBD","created_by":"partner.outlet","created_time":{"seconds":1778221270,"nanos":434265004},"request_id":"dbefff67-dd2d-4764-9074-b8d4fa0e2efc","booking_id_msb":4343447768081646108,"booking_id_lsb":13685280325968429888,"booking_no":"382153FB19A74"},"details":[{"creator_code":"OJ","category_creator":"PUSAT","executor_code":"HO","category_executor":"PUSAT","order_area":"JKT","order_no":"1104660308","item_no":1,"pickup_point":"KCIC Station, Jl. Akses Kereta Cepat Halim Perdanakusumah, Desa/Kelurahan Halim Perdana Kusuma, Kec. Makasar, Kota Adm. Jakarta Timur, Provinsi DKI Jakarta. 13610","pickup_latlong":"-6.246204,106.885446","drop_point":"Jalan Cakra Wijaya IV, Jalan Cakra Wijaya IV, Jatinegara, Jakarta Timur, Jawa, 13420 (-6.231255, 106.887741)","drop_latlong":"-6.231255,106.887741","start_time":{"seconds":1778221269},"end_time":{"seconds":1778224869},"estimate_time":{"seconds":1778219469},"destination_group":"PG1","destination_type":"O","service_type":"O","destination_name":"GB Now - Innova","destination_code":"ARGO","vehicle_type":"KIJANG","vehicle_class":"STD2","duration_used":1,"duration_used_unit":"HOURS","request_driver":{},"discount_type":"RUPIAH","price_idr":200000,"total_price":200000,"consumer_name":"Tedt","created_by":"partner.outlet","created_time":{"seconds":1778221270,"nanos":434268570},"order_id":"1104660308","platform_fee":2000,"booking_id_msb":4343447768081646108,"booking_id_lsb":13685280325968429888,"item_id":"2787"}],"payment":{"executor_code":"HO","creator_code":"OJ","order_area":"JKT","order_no":"1104660308","order_date":{"seconds":1778221269},"payment_to":1,"payment_type":"TUNAI","payment_method":"CREDIT CARD","total_price":200000,"down_payment":200000,"created_by":"partner.outlet","created_time":{"seconds":1778221270,"nanos":434269944},"base_price":200000}}`;
+
+      /* ---- Wire UI ---- */
+      document.getElementById("btnParse").addEventListener("click", doParse);
+      document.getElementById("btnClear").addEventListener("click", () => {
+        const s = activeSession();
+        if (!s) return;
+        s.input = "";
+        s.value = null;
+        s.format = null;
+        s.wrapper = null;
+        s.source = null;
+        s.autoLabel = "";
+        s.error = false;
+        s.status = { ok: null, msg: "Cleared." };
+        loadIntoUI(s);
+        renderSessionBar();
+        persistDebounced();
+      });
+      document
+        .getElementById("btnPaste")
+        .addEventListener("click", async () => {
+          try {
+            const t = await navigator.clipboard.readText();
+            document.getElementById("input").value = t;
+            doParse();
+          } catch (e) {
+            showToast("Clipboard tidak bisa dibaca");
+          }
+        });
+      document.getElementById("btnCopyJson").addEventListener("click", () => {
+        const s = activeSession();
+        if (!s || !s.value) return showToast("Belum ada data");
+        copyToClipboard(JSON.stringify(s.value, null, 2));
+      });
+      document.getElementById("btnExpand").addEventListener("click", () => {
+        document.querySelectorAll(".tree .node.collapsed").forEach((n) => {
+          n.classList.remove("collapsed");
+          const t = n.querySelector(":scope > .row > .toggle");
+          if (t) t.textContent = "▼";
+        });
+      });
+      document.getElementById("btnCollapse").addEventListener("click", () => {
+        document.querySelectorAll(".tree .node").forEach((n) => {
+          if (n.classList.contains("root")) return;
+          if (n.querySelector(".children")) {
+            n.classList.add("collapsed");
+            const t = n.querySelector(":scope > .row > .toggle");
+            if (t) t.textContent = "▶";
+          }
+        });
+      });
+      document.querySelectorAll(".panel-head .tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          document
+            .querySelectorAll(".panel-head .tab")
+            .forEach((t) => t.classList.remove("active"));
+          tab.classList.add("active");
+          const s = activeSession();
+          if (s) {
+            s.outTab = tab.dataset.tab;
+            persistDebounced();
+          }
+          renderActiveTab();
+        });
+      });
+      document.getElementById("search").addEventListener("input", (e) => {
+        applySearch(e.target.value);
+        const s = activeSession();
+        if (s) {
+          s.search = e.target.value;
+          persistDebounced();
+        }
+      });
+      document.getElementById("input").addEventListener("input", () => {
+        const s = activeSession();
+        if (s) {
+          s.input = document.getElementById("input").value;
+          persistDebounced();
+        }
+      });
+      document.getElementById("input").addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          e.preventDefault();
+          doParse();
+        }
+      });
+
+      /* ---- Session tab handlers ---- */
+      document
+        .getElementById("btnNewTab")
+        .addEventListener("click", () => newSession(true));
+      document.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "t") {
+          e.preventDefault();
+          newSession(true);
+        } else if ((e.ctrlKey || e.metaKey) && e.key === "w") {
+          e.preventDefault();
+          if (activeSession()) closeSession(activeId);
+        } else if ((e.ctrlKey || e.metaKey) && e.key === "Tab") {
+          e.preventDefault();
+          if (sessions.length > 1) {
+            const i = sessions.findIndex((s) => s.id === activeId);
+            const next = sessions[(i + 1) % sessions.length];
+            switchSession(next.id);
+          }
+        }
+      });
+
+      /* ---- Init: restore from localStorage or create first session ---- */
+      if (!restore()) {
+        sessions = [newSessionObj()];
+        activeId = sessions[0].id;
+      }
+      loadIntoUI(activeSession());
+      renderSessionBar();
+    </script>
+  </body>
+</html>
