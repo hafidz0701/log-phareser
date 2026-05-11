@@ -57,8 +57,8 @@
       }
       .container {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
+        grid-template-columns: minmax(280px, var(--left-width, 1fr)) 6px minmax(320px, 1fr);
+        gap: 0;
         height: calc(100vh - 60px);
         padding: 12px;
       }
@@ -69,6 +69,34 @@
         display: flex;
         flex-direction: column;
         min-height: 0;
+        min-width: 0;
+        overflow: hidden;
+      }
+      .resizer {
+        cursor: col-resize;
+        position: relative;
+        background: transparent;
+        transition: background 0.15s;
+      }
+      .resizer:hover,
+      .resizer.dragging {
+        background: rgba(88, 166, 255, 0.15);
+      }
+      .resizer::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 2px;
+        height: 36px;
+        background: var(--border);
+        border-radius: 2px;
+        transition: background 0.15s;
+      }
+      .resizer:hover::after,
+      .resizer.dragging::after {
+        background: var(--accent);
       }
       .panel-head {
         padding: 10px 12px;
@@ -183,6 +211,8 @@
       }
       .tree .str {
         color: var(--str);
+        word-break: break-word;
+        overflow-wrap: anywhere;
       }
       .tree .num {
         color: var(--num);
@@ -219,6 +249,10 @@
       .tree .row.match {
         background: rgba(241, 196, 15, 0.12);
         border-radius: 3px;
+      }
+      .tree .row.match.active {
+        background: rgba(241, 196, 15, 0.35);
+        outline: 1px solid var(--highlight);
       }
       .tree .copy-btn {
         visibility: hidden;
@@ -461,6 +495,34 @@
       .container {
         height: calc(100vh - 60px - 35px);
       }
+      pre.json-raw {
+        word-break: break-word;
+        white-space: pre-wrap;
+      }
+      mark.search-match {
+        background: rgba(241, 196, 15, 0.45);
+        color: var(--text);
+        border-radius: 2px;
+        padding: 0 1px;
+      }
+      mark.search-match.active {
+        background: var(--highlight);
+        color: #0e1116;
+        outline: 1px solid var(--accent);
+      }
+      .meta-card.match {
+        background: rgba(241, 196, 15, 0.12);
+        border-color: var(--highlight);
+      }
+      .search-info {
+        font-size: 10px;
+        color: var(--muted);
+        margin-left: 4px;
+        white-space: nowrap;
+      }
+      .search-info.has-results {
+        color: var(--highlight);
+      }
     </style>
   </head>
   <body>
@@ -502,6 +564,8 @@
         <div id="status" class="status">Siap. Paste log lalu klik Parse.</div>
       </div>
 
+      <div class="resizer" id="resizer" title="Drag untuk resize"></div>
+
       <!-- Output panel -->
       <div class="panel">
         <div class="panel-head">
@@ -515,8 +579,9 @@
             type="text"
             id="search"
             class="search"
-            placeholder="Search field/value..."
+            placeholder="Search field/value... (Enter=next)"
           />
+          <span id="searchInfo" class="search-info"></span>
           <button id="btnExpand">Expand All</button>
           <button id="btnCollapse">Collapse</button>
           <button id="btnCopyJson">Copy JSON</button>
@@ -852,8 +917,9 @@
         const result = {};
         let foundAny = false;
 
-        // 1) Bracketed labels: [LABEL]={...}
-        const labelRe = /\[([A-Z_][A-Z0-9_]*)\]=/g;
+        // 1) Bracketed labels — both [LABEL]={...} and [label]: ... styles.
+        //    Accept any case and either '=' or ':' as separator.
+        const labelRe = /\[([a-zA-Z_][a-zA-Z0-9_]*)\]\s*[=:]\s*/g;
         const labels = [];
         let m;
         while ((m = labelRe.exec(text)) !== null) {
@@ -866,27 +932,51 @@
         for (let i = 0; i < labels.length; i++) {
           const lbl = labels[i];
           const end = i + 1 < labels.length ? labels[i + 1].start : text.length;
-          const segment = text.substring(lbl.valueStart, end).trim();
-          if (segment.startsWith("{")) {
+          let segment = text.substring(lbl.valueStart, end).trim();
+          // strip trailing separator punctuation
+          segment = segment.replace(/[,;]\s*$/, "");
+
+          // Try in order: real JSON → escaped JSON → Go struct → free-form pairs → raw text
+          let assigned = false;
+
+          if (segment.startsWith("{") || segment.startsWith("[")) {
+            // Try forgiving JSON
             try {
-              const parser = new GoStructParser(segment);
-              const v = parser.parse();
-              result[lbl.name] = v;
-              foundAny = true;
-            } catch (e) {
-              result[lbl.name] = { _error: e.message, _raw: segment };
+              const j = forgivingJsonParse(segment);
+              if (j && typeof j === "object") {
+                result[lbl.name] = j;
+                assigned = true;
+              }
+            } catch (_) {}
+            // Try escaped JSON
+            if (!assigned) {
+              const esc = tryEscapedJson(segment);
+              if (esc) {
+                result[lbl.name] = esc;
+                assigned = true;
+              }
             }
-          } else {
-            // Free-form — split by ", " on key = 'value' pairs
+            // Try Go struct
+            if (!assigned && segment.startsWith("{")) {
+              try {
+                result[lbl.name] = new GoStructParser(segment).parse();
+                assigned = true;
+              } catch (e) {
+                result[lbl.name] = { _error: e.message, _raw: segment };
+                assigned = true;
+              }
+            }
+          }
+
+          if (!assigned) {
             const pairs = parseQuotedPairs(segment);
             if (Object.keys(pairs).length) {
               result[lbl.name] = pairs;
-              foundAny = true;
             } else {
               result[lbl.name] = segment;
-              foundAny = true;
             }
           }
+          foundAny = true;
         }
 
         // 2) Pull out level=info ts=... caller=... prefix as a header (if no labels found)
@@ -1186,33 +1276,147 @@
       }
 
       /* ========================================================================
-       *  Search / highlight
+       *  Search / highlight — works across Tree, JSON, Metadata views
        * ====================================================================== */
+      let searchMatches = [];   // current <mark> elements (JSON view only)
+      let searchIndex = -1;     // current active match index
+
       function applySearch(query) {
-        const q = query.trim().toLowerCase();
-        const tree = document.querySelector(".tree");
-        if (!tree) return;
-        const rows = tree.querySelectorAll(".row");
-        rows.forEach((r) => r.classList.remove("match"));
-        if (!q) return;
-        rows.forEach((r) => {
-          if (r.textContent.toLowerCase().includes(q)) {
-            r.classList.add("match");
-            // ensure ancestors are expanded
-            let p = r.parentElement;
-            while (p && p.classList) {
-              if (
-                p.classList.contains("node") &&
-                p.classList.contains("collapsed")
-              ) {
-                p.classList.remove("collapsed");
-                const t = p.querySelector(":scope > .row > .toggle");
-                if (t) t.textContent = "▼";
+        const out = document.getElementById("output");
+        const info = document.getElementById("searchInfo");
+        const q = query.trim();
+        searchMatches = [];
+        searchIndex = -1;
+
+        // ---- Clean prior highlights everywhere ----
+        out.querySelectorAll("mark.search-match").forEach((mk) => {
+          const txt = document.createTextNode(mk.textContent);
+          mk.parentNode.replaceChild(txt, mk);
+        });
+        out.querySelectorAll(".row.match").forEach((r) => r.classList.remove("match"));
+        out.querySelectorAll(".meta-card.match").forEach((c) => c.classList.remove("match"));
+        // normalize merged text nodes so subsequent searches don't fragment
+        out.querySelectorAll("pre.json-raw").forEach((p) => p.normalize());
+
+        if (!q) {
+          info.textContent = "";
+          info.classList.remove("has-results");
+          return;
+        }
+
+        const ql = q.toLowerCase();
+        let totalMatches = 0;
+
+        // ---- Tree view: highlight rows + expand ancestors ----
+        const tree = out.querySelector(".tree");
+        if (tree) {
+          tree.querySelectorAll(".row").forEach((r) => {
+            if (r.textContent.toLowerCase().includes(ql)) {
+              r.classList.add("match");
+              totalMatches++;
+              // expand ancestors
+              let p = r.parentElement;
+              while (p && p.classList) {
+                if (
+                  p.classList.contains("node") &&
+                  p.classList.contains("collapsed")
+                ) {
+                  p.classList.remove("collapsed");
+                  const t = p.querySelector(":scope > .row > .toggle");
+                  if (t) t.textContent = "▼";
+                }
+                p = p.parentElement;
               }
-              p = p.parentElement;
             }
+          });
+          // scroll first match into view
+          const firstMatch = tree.querySelector(".row.match");
+          if (firstMatch) firstMatch.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+
+        // ---- JSON view: wrap text occurrences with <mark> ----
+        const jsonPre = out.querySelector("pre.json-raw");
+        if (jsonPre) {
+          highlightTextOccurrences(jsonPre, q);
+          searchMatches = Array.from(jsonPre.querySelectorAll("mark.search-match"));
+          totalMatches += searchMatches.length;
+          if (searchMatches.length) {
+            searchIndex = 0;
+            searchMatches[0].classList.add("active");
+            searchMatches[0].scrollIntoView({ block: "center", behavior: "smooth" });
+          }
+        }
+
+        // ---- Metadata cards ----
+        out.querySelectorAll(".meta-card").forEach((card) => {
+          if (card.textContent.toLowerCase().includes(ql)) {
+            card.classList.add("match");
+            totalMatches++;
           }
         });
+
+        info.textContent = totalMatches ? `${totalMatches} match${totalMatches > 1 ? "es" : ""}` : "no match";
+        info.classList.toggle("has-results", totalMatches > 0);
+      }
+
+      /** Wrap all (case-insensitive) occurrences of `q` in text nodes inside `root` with <mark>. */
+      function highlightTextOccurrences(root, q) {
+        const ql = q.toLowerCase();
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+        const nodes = [];
+        let n;
+        while ((n = walker.nextNode())) {
+          if (n.nodeValue && n.nodeValue.toLowerCase().includes(ql)) nodes.push(n);
+        }
+        for (const node of nodes) {
+          const text = node.nodeValue;
+          const lower = text.toLowerCase();
+          const frag = document.createDocumentFragment();
+          let i = 0;
+          while (i < text.length) {
+            const idx = lower.indexOf(ql, i);
+            if (idx === -1) {
+              frag.appendChild(document.createTextNode(text.substring(i)));
+              break;
+            }
+            if (idx > i) frag.appendChild(document.createTextNode(text.substring(i, idx)));
+            const mk = document.createElement("mark");
+            mk.className = "search-match";
+            mk.textContent = text.substring(idx, idx + q.length);
+            frag.appendChild(mk);
+            i = idx + q.length;
+          }
+          node.parentNode.replaceChild(frag, node);
+        }
+      }
+
+      /** Cycle to next/prev match in current view (works for JSON marks + tree rows). */
+      function navigateSearch(delta) {
+        const out = document.getElementById("output");
+        // JSON view: cycle through <mark>
+        if (searchMatches.length) {
+          if (searchIndex >= 0 && searchMatches[searchIndex]) {
+            searchMatches[searchIndex].classList.remove("active");
+          }
+          searchIndex = (searchIndex + delta + searchMatches.length) % searchMatches.length;
+          const cur = searchMatches[searchIndex];
+          cur.classList.add("active");
+          cur.scrollIntoView({ block: "center", behavior: "smooth" });
+          const info = document.getElementById("searchInfo");
+          info.textContent = `${searchIndex + 1}/${searchMatches.length}`;
+          return;
+        }
+        // Tree view: cycle through .row.match
+        const rows = Array.from(out.querySelectorAll(".tree .row.match"));
+        if (rows.length === 0) return;
+        // find currently focused row, default -1
+        let cur = rows.findIndex((r) => r.classList.contains("active"));
+        if (cur >= 0) rows[cur].classList.remove("active");
+        cur = (cur + delta + rows.length) % rows.length;
+        rows[cur].classList.add("active");
+        rows[cur].scrollIntoView({ block: "center", behavior: "smooth" });
+        const info = document.getElementById("searchInfo");
+        info.textContent = `${cur + 1}/${rows.length}`;
       }
 
       /* ========================================================================
@@ -1715,6 +1919,20 @@
           persistDebounced();
         }
       });
+      document.getElementById("search").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          navigateSearch(e.shiftKey ? -1 : 1);
+        } else if (e.key === "Escape") {
+          e.target.value = "";
+          applySearch("");
+          const s = activeSession();
+          if (s) {
+            s.search = "";
+            persistDebounced();
+          }
+        }
+      });
       document.getElementById("input").addEventListener("input", () => {
         const s = activeSession();
         if (s) {
@@ -1749,6 +1967,55 @@
           }
         }
       });
+
+      /* ---- Resizer (drag to adjust left/right panel widths) ---- */
+      (function setupResizer() {
+        const resizer = document.getElementById("resizer");
+        const container = document.querySelector(".container");
+        const LS_KEY = "leftPanelWidth";
+        let dragging = false;
+        let startX = 0;
+        let startLeftWidth = 0;
+
+        // Restore saved width
+        const saved = localStorage.getItem(LS_KEY);
+        if (saved) container.style.setProperty("--left-width", saved);
+
+        resizer.addEventListener("mousedown", (e) => {
+          dragging = true;
+          startX = e.clientX;
+          const leftPanel = container.children[0];
+          startLeftWidth = leftPanel.getBoundingClientRect().width;
+          resizer.classList.add("dragging");
+          document.body.style.userSelect = "none";
+          document.body.style.cursor = "col-resize";
+          e.preventDefault();
+        });
+
+        document.addEventListener("mousemove", (e) => {
+          if (!dragging) return;
+          const dx = e.clientX - startX;
+          const max = window.innerWidth - 320 - 24; // leave room for right panel + padding
+          const newWidth = Math.max(280, Math.min(max, startLeftWidth + dx));
+          container.style.setProperty("--left-width", newWidth + "px");
+        });
+
+        document.addEventListener("mouseup", () => {
+          if (!dragging) return;
+          dragging = false;
+          resizer.classList.remove("dragging");
+          document.body.style.userSelect = "";
+          document.body.style.cursor = "";
+          const v = container.style.getPropertyValue("--left-width");
+          if (v) localStorage.setItem(LS_KEY, v);
+        });
+
+        // Double-click resizer to reset to 50/50
+        resizer.addEventListener("dblclick", () => {
+          container.style.setProperty("--left-width", "1fr");
+          localStorage.removeItem(LS_KEY);
+        });
+      })();
 
       /* ---- Init: restore from localStorage or create first session ---- */
       if (!restore()) {
