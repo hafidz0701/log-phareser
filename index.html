@@ -644,10 +644,46 @@
         }
 
         parseValue() {
-          if (this.peek() === "{") return this.parseStruct();
-          if (this.peek() === "[") return this.parseSlice();
+          const c = this.peek();
+          if (c === "{" && this.isCleanContainer("{")) return this.parseStruct();
+          if (c === "[" && this.isCleanContainer("[")) return this.parseSlice();
           if (this.match("map[")) return this.parseMap();
           return this.parseScalar();
+        }
+
+        /**
+         * Look ahead from current `{` or `[` to find balanced close, then check
+         * what follows. Only return true if it looks like a real container
+         * (clean field separator after close). Otherwise the value is likely
+         * a string that just happens to start with `[` or `{` — e.g.
+         *   Message:[PASSCODE RESULT] Invalid Passcode Code:10002
+         * where `[PASSCODE RESULT]` is part of the message string.
+         */
+        isCleanContainer(openChar) {
+          const closeChar = openChar === "{" ? "}" : "]";
+          let depth = 0;
+          let i = this.pos;
+          while (i < this.s.length) {
+            const c = this.s[i];
+            if (c === openChar) depth++;
+            else if (c === closeChar) {
+              depth--;
+              if (depth === 0) break;
+            }
+            i++;
+          }
+          if (i >= this.s.length) return false; // unbalanced
+          const next = this.s[i + 1];
+          if (next === undefined) return true;
+          if (next === "}" || next === "]") return true;
+          if (next === " ") {
+            const after = this.s[i + 2];
+            if (after === undefined) return true;
+            if (after === "{" || after === "[") return true;
+            if (after === "}" || after === "]") return true;
+            return this.isNextFieldAt(i + 1);
+          }
+          return false;
         }
 
         parseStruct() {
@@ -1196,6 +1232,46 @@
                 assigned = true;
               } catch (e) {
                 result[lbl.name] = { _error: e.message, _raw: segment };
+                assigned = true;
+              }
+            }
+          }
+
+          // Prefix text + embedded struct/JSON, e.g.:
+          //   [INFO]=publish validate passcode: {Valid:false ...}
+          // The label value has a human description before the actual payload.
+          if (!assigned) {
+            const braceIdx = segment.indexOf("{");
+            if (braceIdx > 0) {
+              const prefix = segment
+                .substring(0, braceIdx)
+                .trim()
+                .replace(/[:\-]\s*$/, "");
+              const rest = segment.substring(braceIdx);
+              let parsedRest = null;
+              try {
+                const j = forgivingJsonParse(rest);
+                if (j && typeof j === "object") parsedRest = j;
+              } catch (_) {}
+              if (!parsedRest) {
+                const esc = tryEscapedJson(rest);
+                if (esc) parsedRest = esc;
+              }
+              if (!parsedRest) {
+                try {
+                  parsedRest = new GoStructParser(rest).parse();
+                } catch (_) {}
+              }
+              if (parsedRest && typeof parsedRest === "object") {
+                if (Array.isArray(parsedRest)) {
+                  result[lbl.name] = prefix
+                    ? { _info: prefix, items: parsedRest }
+                    : parsedRest;
+                } else {
+                  result[lbl.name] = prefix
+                    ? { _info: prefix, ...parsedRest }
+                    : parsedRest;
+                }
                 assigned = true;
               }
             }
