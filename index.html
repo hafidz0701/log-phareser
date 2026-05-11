@@ -402,6 +402,11 @@
         border-color: #3a5e5b;
         color: #5fd8d2;
       }
+      .badge.json-stream {
+        background: #2d3a4a;
+        border-color: #3a4d5e;
+        color: #8fc5ff;
+      }
       .badge.logfmt {
         background: #3d2d4a;
         border-color: #4f3a5e;
@@ -645,34 +650,41 @@
 
         parseValue() {
           const c = this.peek();
-          if (c === "{" && this.isCleanContainer("{")) return this.parseStruct();
-          if (c === "[" && this.isCleanContainer("[")) return this.parseSlice();
+          // '{' always opens a struct — Go's %+v never starts a string value
+          // with a bare '{' (would be quoted via %q if it did).
+          if (c === "{") return this.parseStruct();
+          // '[' is ambiguous: could be slice OR start of a string like
+          //   Message:[PASSCODE RESULT] Invalid Passcode
+          // Only treat as slice if the matching ']' is followed by a clean
+          // field separator. Skip over '"..."' regions during brace counting
+          // so polyline-like quoted strings don't break the count.
+          if (c === "[" && this.isCleanSliceStart()) return this.parseSlice();
           if (this.match("map[")) return this.parseMap();
           return this.parseScalar();
         }
 
-        /**
-         * Look ahead from current `{` or `[` to find balanced close, then check
-         * what follows. Only return true if it looks like a real container
-         * (clean field separator after close). Otherwise the value is likely
-         * a string that just happens to start with `[` or `{` — e.g.
-         *   Message:[PASSCODE RESULT] Invalid Passcode Code:10002
-         * where `[PASSCODE RESULT]` is part of the message string.
-         */
-        isCleanContainer(openChar) {
-          const closeChar = openChar === "{" ? "}" : "]";
+        /** Lookahead from current '[' to decide if it's a real slice. */
+        isCleanSliceStart() {
           let depth = 0;
           let i = this.pos;
+          let inQuote = false;
           while (i < this.s.length) {
             const c = this.s[i];
-            if (c === openChar) depth++;
-            else if (c === closeChar) {
+            if (inQuote) {
+              if (c === "\\") { i += 2; continue; }
+              if (c === '"') inQuote = false;
+              i++;
+              continue;
+            }
+            if (c === '"') { inQuote = true; i++; continue; }
+            if (c === "[") depth++;
+            else if (c === "]") {
               depth--;
               if (depth === 0) break;
             }
             i++;
           }
-          if (i >= this.s.length) return false; // unbalanced
+          if (i >= this.s.length) return false;
           const next = this.s[i + 1];
           if (next === undefined) return true;
           if (next === "}" || next === "]") return true;
@@ -895,6 +907,54 @@
       }
 
       /**
+       * JSON stream — multiple top-level JSON objects/arrays separated by
+       * any whitespace (space, tab, newline). Handles cases like:
+       *   {"req":{...}} {"resp":{...}} {"meta":{...}}
+       * Different from NDJSON which requires newlines between entries.
+       */
+      function tryParseJsonStream(s) {
+        s = s.trim();
+        if (s.length < 4) return null;
+        if (s[0] !== "{" && s[0] !== "[") return null;
+        const results = [];
+        let i = 0;
+        while (i < s.length) {
+          while (i < s.length && /\s/.test(s[i])) i++;
+          if (i >= s.length) break;
+          if (s[i] !== "{" && s[i] !== "[") return null;
+          const start = i;
+          let depth = 0;
+          let inQuote = false;
+          while (i < s.length) {
+            const c = s[i];
+            if (inQuote) {
+              if (c === "\\") { i += 2; continue; }
+              if (c === '"') inQuote = false;
+              i++;
+              continue;
+            }
+            if (c === '"') { inQuote = true; i++; continue; }
+            if (c === "{" || c === "[") depth++;
+            else if (c === "}" || c === "]") {
+              depth--;
+              if (depth === 0) { i++; break; }
+            }
+            i++;
+          }
+          if (depth !== 0) return null;
+          const chunk = s.substring(start, i);
+          try {
+            const j = forgivingJsonParse(chunk);
+            if (j === undefined || j === null) return null;
+            results.push(j);
+          } catch (_) {
+            return null;
+          }
+        }
+        return results.length >= 2 ? results : null;
+      }
+
+      /**
        * NDJSON / JSON Lines — multiple JSON objects separated by newlines.
        * Common output of `kubectl logs`, `docker logs`, `jq -c`, structured
        * loggers writing to file, etc.
@@ -1077,6 +1137,10 @@
           if (nd) return { format: "ndjson", value: nd };
         }
 
+        // Case D2: JSON stream — multiple {...} on one line (or mixed whitespace)
+        const stream = tryParseJsonStream(stripped);
+        if (stream) return { format: "json-stream", value: stream };
+
         // Case E: raw payload — could be Go struct or messy text
         // If starts with '{' but isn't valid JSON, parse as Go struct
         if (stripped.startsWith("{")) {
@@ -1189,49 +1253,102 @@
         // 1) Bracketed labels — both [LABEL]={...} and [label]: ... styles.
         //    Accept any case and either '=' or ':' as separator.
         const labelRe = /\[([a-zA-Z_][a-zA-Z0-9_]*)\]\s*[=:]\s*/g;
-        const labels = [];
+        const rawLabels = [];
         let m;
         while ((m = labelRe.exec(text)) !== null) {
-          labels.push({
+          rawLabels.push({
             name: m[1],
             start: m.index,
             valueStart: m.index + m[0].length,
           });
         }
+
+        // Pre-process: merge consecutive same-name labels where the first
+        // is a short description and the second is structured data, e.g.
+        //   [REQUEST]=Upper AddOrder [REQUEST]={OrderID:... }
+        // becomes one [REQUEST] with `_info: "Upper AddOrder"` plus fields.
+        const labels = [];
+        for (let i = 0; i < rawLabels.length; i++) {
+          const cur = rawLabels[i];
+          const next = rawLabels[i + 1];
+          if (next && next.name === cur.name) {
+            const seg1 = text.substring(cur.valueStart, next.start).trim();
+            const seg2_end = i + 2 < rawLabels.length ? rawLabels[i + 2].start : text.length;
+            const seg2 = text.substring(next.valueStart, seg2_end).trim();
+            const seg1IsShortDesc =
+              seg1.length > 0 && seg1.length < 80 &&
+              !seg1.startsWith("{") && !seg1.startsWith("[");
+            const seg2IsStructured =
+              seg2.startsWith("{") || seg2.startsWith("[");
+            if (seg1IsShortDesc && seg2IsStructured) {
+              labels.push({
+                name: cur.name,
+                prefix: seg1.replace(/[:\-]\s*$/, ""),
+                valueStart: next.valueStart,
+                valueEnd: seg2_end,
+              });
+              i++; // skip the merged-into label
+              continue;
+            }
+          }
+          labels.push({
+            name: cur.name,
+            prefix: null,
+            valueStart: cur.valueStart,
+            valueEnd: i + 1 < rawLabels.length ? rawLabels[i + 1].start : text.length,
+          });
+        }
+
+        // Collect parsed items in original order; group same-name into arrays.
+        const parsedItems = [];
+
         for (let i = 0; i < labels.length; i++) {
           const lbl = labels[i];
-          const end = i + 1 < labels.length ? labels[i + 1].start : text.length;
+          const end = lbl.valueEnd;
           let segment = text.substring(lbl.valueStart, end).trim();
-          // strip trailing separator punctuation
           segment = segment.replace(/[,;]\s*$/, "");
 
-          // Try in order: real JSON → escaped JSON → Go struct → free-form pairs → raw text
+          let value = null;
           let assigned = false;
+
+          // Attach `_info` prefix if set, returning a properly shaped value
+          const withPrefix = (parsed) => {
+            if (
+              lbl.prefix &&
+              parsed &&
+              typeof parsed === "object" &&
+              !Array.isArray(parsed)
+            ) {
+              return { _info: lbl.prefix, ...parsed };
+            } else if (lbl.prefix && Array.isArray(parsed)) {
+              return { _info: lbl.prefix, items: parsed };
+            }
+            return parsed;
+          };
 
           if (segment.startsWith("{") || segment.startsWith("[")) {
             // Try forgiving JSON
             try {
               const j = forgivingJsonParse(segment);
-              if (j && typeof j === "object") {
-                result[lbl.name] = j;
-                assigned = true;
-              }
+              if (j && typeof j === "object") { value = withPrefix(j); assigned = true; }
             } catch (_) {}
+            // Try JSON stream (multiple JSONs glued together)
+            if (!assigned) {
+              const stream = tryParseJsonStream(segment);
+              if (stream) { value = withPrefix(stream); assigned = true; }
+            }
             // Try escaped JSON
             if (!assigned) {
               const esc = tryEscapedJson(segment);
-              if (esc) {
-                result[lbl.name] = esc;
-                assigned = true;
-              }
+              if (esc) { value = withPrefix(esc); assigned = true; }
             }
             // Try Go struct
             if (!assigned && segment.startsWith("{")) {
               try {
-                result[lbl.name] = new GoStructParser(segment).parse();
+                value = withPrefix(new GoStructParser(segment).parse());
                 assigned = true;
               } catch (e) {
-                result[lbl.name] = { _error: e.message, _raw: segment };
+                value = { _error: e.message, _raw: segment };
                 assigned = true;
               }
             }
@@ -1239,7 +1356,6 @@
 
           // Prefix text + embedded struct/JSON, e.g.:
           //   [INFO]=publish validate passcode: {Valid:false ...}
-          // The label value has a human description before the actual payload.
           if (!assigned) {
             const braceIdx = segment.indexOf("{");
             if (braceIdx > 0) {
@@ -1264,11 +1380,11 @@
               }
               if (parsedRest && typeof parsedRest === "object") {
                 if (Array.isArray(parsedRest)) {
-                  result[lbl.name] = prefix
+                  value = prefix
                     ? { _info: prefix, items: parsedRest }
                     : parsedRest;
                 } else {
-                  result[lbl.name] = prefix
+                  value = prefix
                     ? { _info: prefix, ...parsedRest }
                     : parsedRest;
                 }
@@ -1280,12 +1396,25 @@
           if (!assigned) {
             const pairs = parseQuotedPairs(segment);
             if (Object.keys(pairs).length) {
-              result[lbl.name] = pairs;
+              value = pairs;
             } else {
-              result[lbl.name] = segment;
+              value = segment;
             }
+            assigned = true;
           }
+          parsedItems.push({ name: lbl.name, value });
           foundAny = true;
+        }
+
+        // Group by name: single occurrence → value; multiple → array of values
+        const byName = {};
+        for (const item of parsedItems) {
+          if (!byName[item.name]) byName[item.name] = [];
+          byName[item.name].push(item.value);
+        }
+        for (const name of Object.keys(byName)) {
+          const arr = byName[name];
+          result[name] = arr.length === 1 ? arr[0] : arr;
         }
 
         // 2) Pull out level=info ts=... caller=... prefix as a header (if no labels found)
@@ -2010,6 +2139,9 @@
         } else if (s.format === "ndjson") {
           badge.textContent = "NDJSON (" + (Array.isArray(s.value) ? s.value.length : 1) + " lines)";
           badge.classList.add("ndjson");
+        } else if (s.format === "json-stream") {
+          badge.textContent = "JSON stream (" + (Array.isArray(s.value) ? s.value.length : 1) + " objects)";
+          badge.classList.add("json-stream");
         } else if (s.format === "logfmt") {
           badge.textContent = "logfmt";
           badge.classList.add("logfmt");
@@ -2108,6 +2240,9 @@
           } else if (result.format === "ndjson") {
             badge.textContent = "NDJSON (" + (Array.isArray(result.value) ? result.value.length : 1) + " lines)";
             badge.classList.add("ndjson");
+          } else if (result.format === "json-stream") {
+            badge.textContent = "JSON stream (" + (Array.isArray(result.value) ? result.value.length : 1) + " objects)";
+            badge.classList.add("json-stream");
           } else if (result.format === "logfmt") {
             badge.textContent = "logfmt";
             badge.classList.add("logfmt");
