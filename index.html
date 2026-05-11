@@ -397,6 +397,26 @@
         border-color: #5e4f3a;
         color: var(--warn);
       }
+      .badge.ndjson {
+        background: #2d4a48;
+        border-color: #3a5e5b;
+        color: #5fd8d2;
+      }
+      .badge.logfmt {
+        background: #3d2d4a;
+        border-color: #4f3a5e;
+        color: var(--bool);
+      }
+      .badge.apache {
+        background: #4a2d3d;
+        border-color: #5e3a4f;
+        color: #f0a8c4;
+      }
+      .badge.syslog {
+        background: #4a2d2d;
+        border-color: #5e3a3a;
+        color: var(--err);
+      }
       /* Session tabs (Chrome-style) */
       .session-bar {
         display: flex;
@@ -824,7 +844,153 @@
         return null;
       }
 
+      /** Coerce a raw scalar string into number/bool/string. */
+      function coerceScalarValue(v) {
+        if (v === "") return "";
+        if (v === "true") return true;
+        if (v === "false") return false;
+        if (v === "null" || v === "nil") return null;
+        if (/^-?\d+$/.test(v)) {
+          if (v.length > 15) return v; // preserve very large ints as string
+          return parseInt(v, 10);
+        }
+        if (/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
+        return v;
+      }
+
+      /**
+       * NDJSON / JSON Lines — multiple JSON objects separated by newlines.
+       * Common output of `kubectl logs`, `docker logs`, `jq -c`, structured
+       * loggers writing to file, etc.
+       */
+      function tryParseNDJSON(s) {
+        const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        if (lines.length < 2) return null;
+        const results = [];
+        for (const line of lines) {
+          if (!(line.startsWith("{") || line.startsWith("["))) return null;
+          try {
+            const j = forgivingJsonParse(line);
+            if (j && typeof j === "object") results.push(j);
+            else return null;
+          } catch (_) {
+            return null;
+          }
+        }
+        return results.length >= 2 ? results : null;
+      }
+
+      /**
+       * Logfmt — `key=value key="quoted value" key2=42` style.
+       * Used by Go (Logrus, klog), Heroku, Loki, Splunk, Prometheus, etc.
+       */
+      function tryParseLogfmt(s) {
+        const trimmed = s.trim();
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) return null;
+        // pattern: key=value where value may be quoted
+        const re = /([a-zA-Z_][a-zA-Z0-9_.\-]*)=("(?:\\.|[^"\\])*"|[^\s]*)/g;
+        const matches = [...trimmed.matchAll(re)];
+        if (matches.length < 2) return null;
+        // Coverage check: matched text covers >= 50% of input → high confidence
+        const matchedLen = matches.reduce((sum, m) => sum + m[0].length, 0);
+        if (matchedLen / trimmed.length < 0.5) return null;
+        const result = {};
+        for (const m of matches) {
+          let val = m[2];
+          if (val.length >= 2 && val.startsWith('"') && val.endsWith('"')) {
+            try {
+              val = JSON.parse(val);
+            } catch (_) {
+              val = val.slice(1, -1).replace(/\\(.)/g, "$1");
+            }
+          } else {
+            val = coerceScalarValue(val);
+          }
+          result[m[1]] = val;
+        }
+        return Object.keys(result).length ? result : null;
+      }
+
+      /**
+       * Apache/Nginx Combined Log Format:
+       *   127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /pb.gif HTTP/1.0" 200 2326 "ref" "ua"
+       * Also handles Common Log Format (without referrer/user-agent).
+       */
+      function tryParseApache(s) {
+        const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const re =
+          /^(\S+)\s+(\S+)\s+(\S+)\s+\[([^\]]+)\]\s+"(\S+)\s+(\S+)\s+(\S+)"\s+(\d{3})\s+(\S+)(?:\s+"([^"]*)"\s+"([^"]*)")?/;
+        const results = [];
+        for (const line of lines) {
+          const m = re.exec(line);
+          if (!m) return null;
+          results.push({
+            remote_host: m[1],
+            remote_ident: m[2] === "-" ? null : m[2],
+            remote_user: m[3] === "-" ? null : m[3],
+            timestamp: m[4],
+            method: m[5],
+            path: m[6],
+            protocol: m[7],
+            status: parseInt(m[8], 10),
+            bytes: m[9] === "-" ? 0 : parseInt(m[9], 10),
+            referrer: m[10] && m[10] !== "-" ? m[10] : null,
+            user_agent: m[11] && m[11] !== "-" ? m[11] : null,
+          });
+        }
+        if (!results.length) return null;
+        return results.length === 1 ? results[0] : results;
+      }
+
+      /**
+       * Syslog RFC 3164:
+       *   <165>Aug 24 05:34:00 mymachine myproc[10]: It's time to make the do-nuts.
+       */
+      const SYSLOG_FACILITY = [
+        "kern","user","mail","daemon","auth","syslog","lpr","news",
+        "uucp","cron","authpriv","ftp","ntp","security","console","local0",
+        "local1","local2","local3","local4","local5","local6","local7",
+      ];
+      const SYSLOG_SEVERITY = [
+        "emerg","alert","crit","err","warning","notice","info","debug",
+      ];
+      function tryParseSyslog(s) {
+        const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const re =
+          /^<(\d+)>(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^\[\s:]+)(?:\[(\d+)\])?:\s*(.*)$/;
+        const results = [];
+        for (const line of lines) {
+          const m = re.exec(line);
+          if (!m) return null;
+          const priority = parseInt(m[1], 10);
+          const facility = Math.floor(priority / 8);
+          const severity = priority % 8;
+          results.push({
+            priority,
+            facility,
+            facility_name: SYSLOG_FACILITY[facility] || String(facility),
+            severity,
+            severity_name: SYSLOG_SEVERITY[severity] || String(severity),
+            timestamp: m[2],
+            hostname: m[3],
+            program: m[4],
+            pid: m[5] ? parseInt(m[5], 10) : null,
+            message: m[6],
+          });
+        }
+        if (!results.length) return null;
+        return results.length === 1 ? results[0] : results;
+      }
+
       function detectAndParse(raw) {
+        const result = _detectAndParse(raw);
+        if (result && result.value) {
+          result.value = deepDecodeJsonStrings(result.value);
+        }
+        return result;
+      }
+
+      function _detectAndParse(raw) {
         const trimmed = raw.trim();
         if (!trimmed) throw new Error("Input kosong");
 
@@ -869,19 +1035,38 @@
           return { format: "escaped-json", value: escapedDecoded };
         }
 
-        // Case D: raw payload — could be Go struct or messy text
+        // Case D: NDJSON / JSON Lines — multiple JSON objects, one per line
+        if (stripped.includes("\n")) {
+          const nd = tryParseNDJSON(stripped);
+          if (nd) return { format: "ndjson", value: nd };
+        }
+
+        // Case E: raw payload — could be Go struct or messy text
         // If starts with '{' but isn't valid JSON, parse as Go struct
         if (stripped.startsWith("{")) {
           const goVal = new GoStructParser(stripped).parse();
           return { format: "go", value: goVal };
         }
 
-        // Case D: log line with embedded [REQUEST]={...} etc.
+        // Case F: Apache / Nginx Combined Log Format
+        const apache = tryParseApache(stripped);
+        if (apache) return { format: "apache", value: apache };
+
+        // Case G: Syslog RFC 3164
+        const syslog = tryParseSyslog(stripped);
+        if (syslog) return { format: "syslog", value: syslog };
+
+        // Case H: Logfmt (`key=value key2="..."`) — check after structured formats
+        //   because Apache logs also contain `=` chars in some fields
+        const logfmt = tryParseLogfmt(stripped);
+        if (logfmt) return { format: "logfmt", value: logfmt };
+
+        // Case I: log line with embedded [REQUEST]={...} etc.
         const extracted = extractGoStructsFromText(stripped);
         if (extracted) return { format: "go-embedded", value: extracted };
 
         throw new Error(
-          "Format tidak dikenali — bukan JSON, bukan Go struct dump.",
+          "Format tidak dikenali. Format yang didukung: JSON, escaped JSON, Go-struct (%+v), NDJSON, Logfmt, Apache/Nginx, Syslog, container log.",
         );
       }
 
@@ -901,12 +1086,60 @@
             // Try escaped JSON ({\"key\":\"value\"})
             const esc = tryEscapedJson(inner);
             if (esc) return { value: esc, source: `${k} (escaped JSON)` };
-            // Try extracting Go struct(s)
+            // Try extracting Go struct(s) — but reject "trivial" extractions
+            // (just key=value fallback) that would erase a rich wrapper.
             const ex = extractGoStructsFromText(inner);
-            if (ex) return { value: ex, source: `${k} (Go struct)` };
+            if (ex && !isTrivialExtraction(ex)) {
+              return { value: ex, source: `${k} (Go struct)` };
+            }
           }
         }
         return null;
+      }
+
+      /** True if the extracted object is just the loose key=value fallback
+       *  (only `_meta` with primitive values) — not worth overriding the wrapper. */
+      function isTrivialExtraction(ex) {
+        const ks = Object.keys(ex);
+        if (ks.length === 1 && ks[0] === "_meta") return true;
+        return false;
+      }
+
+      /**
+       * Recursively decode JSON-shaped strings into structured values.
+       * Useful for ECS logs that embed payload as a JSON string (e.g.
+       * `reservationStatusUpdatedPayload: "{\"status_type\":...}"`).
+       * Strings that don't parse cleanly are left as-is.
+       */
+      function deepDecodeJsonStrings(value, depth = 0) {
+        if (depth > 8) return value;
+        if (typeof value === "string") {
+          const trimmed = value.trim();
+          if (trimmed.length < 4) return value;
+          if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return value;
+          // Try plain JSON
+          try {
+            const parsed = forgivingJsonParse(trimmed);
+            if (parsed && typeof parsed === "object") {
+              return deepDecodeJsonStrings(parsed, depth + 1);
+            }
+          } catch (_) {}
+          // Try escaped JSON
+          const esc = tryEscapedJson(trimmed);
+          if (esc) return deepDecodeJsonStrings(esc, depth + 1);
+          return value;
+        }
+        if (Array.isArray(value)) {
+          return value.map((v) => deepDecodeJsonStrings(v, depth + 1));
+        }
+        if (value && typeof value === "object") {
+          const out = {};
+          for (const k of Object.keys(value)) {
+            out[k] = deepDecodeJsonStrings(value[k], depth + 1);
+          }
+          return out;
+        }
+        return value;
       }
 
       /**
@@ -1016,6 +1249,7 @@
         "trace_id",
         "traceId",
         "traceID",
+        "trace-id",
         "request_id",
         "requestId",
         "RequestId",
@@ -1050,6 +1284,14 @@
         "CreatedBy",
         "severity",
         "level",
+        "log.level",
+        "service_name",
+        "method",
+        "@timestamp",
+        "status_type",
+        "status_from",
+        "status_to",
+        "event_date",
       ];
 
       function harvestMetadata(value, prefix = "") {
@@ -1469,6 +1711,7 @@
         "request_id",
         "TripId",
         "trace_id",
+        "trace-id",
       ];
 
       function autoLabelFor(s) {
@@ -1688,6 +1931,18 @@
         } else if (s.format === "escaped-json") {
           badge.textContent = "escaped JSON";
           badge.classList.add("json");
+        } else if (s.format === "ndjson") {
+          badge.textContent = "NDJSON (" + (Array.isArray(s.value) ? s.value.length : 1) + " lines)";
+          badge.classList.add("ndjson");
+        } else if (s.format === "logfmt") {
+          badge.textContent = "logfmt";
+          badge.classList.add("logfmt");
+        } else if (s.format === "apache") {
+          badge.textContent = "Apache/Nginx log";
+          badge.classList.add("apache");
+        } else if (s.format === "syslog") {
+          badge.textContent = "syslog";
+          badge.classList.add("syslog");
         } else if (s.format === "go" || s.format === "go-embedded") {
           badge.textContent = "Go struct";
           badge.classList.add("go");
@@ -1774,6 +2029,18 @@
           } else if (result.format === "escaped-json") {
             badge.textContent = "escaped JSON";
             badge.classList.add("json");
+          } else if (result.format === "ndjson") {
+            badge.textContent = "NDJSON (" + (Array.isArray(result.value) ? result.value.length : 1) + " lines)";
+            badge.classList.add("ndjson");
+          } else if (result.format === "logfmt") {
+            badge.textContent = "logfmt";
+            badge.classList.add("logfmt");
+          } else if (result.format === "apache") {
+            badge.textContent = "Apache/Nginx log";
+            badge.classList.add("apache");
+          } else if (result.format === "syslog") {
+            badge.textContent = "syslog";
+            badge.classList.add("syslog");
           } else if (
             result.format === "go" ||
             result.format === "go-embedded"
