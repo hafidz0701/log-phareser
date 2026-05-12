@@ -422,6 +422,11 @@
         border-color: #5e3a3a;
         color: var(--err);
       }
+      .badge.proto-text {
+        background: #2d4a3a;
+        border-color: #3a5e4a;
+        color: #8fe3a3;
+      }
       /* Session tabs (Chrome-style) */
       .session-bar {
         display: flex;
@@ -829,6 +834,192 @@
       }
 
       /* ========================================================================
+       *  Protobuf text format parser (proto.MarshalTextString output)
+       *
+       *  Grammar:
+       *    message  ::= field*
+       *    field    ::= name (':')? value
+       *    value    ::= '<' message '>' | '{' message '}' | string | scalar | list
+       *    string   ::= '"' chars '"'  |  "'" chars "'"
+       *    list     ::= '[' value (',' value)* ']'
+       *
+       *  Repeated fields appear multiple times with the same name and are
+       *  collected into an array automatically.
+       * ====================================================================== */
+      class ProtoTextParser {
+        constructor(input) {
+          this.s = input;
+          this.pos = 0;
+        }
+        peek() { return this.s[this.pos]; }
+        eof() { return this.pos >= this.s.length; }
+
+        skipWhitespace() {
+          while (!this.eof() && /\s/.test(this.peek())) this.pos++;
+        }
+
+        parse() {
+          this.skipWhitespace();
+          return this.parseMessage(null);
+        }
+
+        parseMessage(closer) {
+          const result = {};
+          let safety = 0;
+          while (!this.eof() && safety++ < 100000) {
+            this.skipWhitespace();
+            if (this.eof()) break;
+            if (closer && this.peek() === closer) break;
+
+            // Read field name
+            const nameStart = this.pos;
+            while (!this.eof() && /[a-zA-Z0-9_]/.test(this.peek())) this.pos++;
+            if (this.pos === nameStart) {
+              // recover: skip one unknown char so we don't infinite-loop
+              this.pos++;
+              continue;
+            }
+            const name = this.s.substring(nameStart, this.pos);
+
+            this.skipWhitespace();
+            if (this.peek() === ":") {
+              this.pos++;
+              this.skipWhitespace();
+            }
+            const value = this.parseValue();
+
+            if (name in result) {
+              if (!Array.isArray(result[name])) result[name] = [result[name]];
+              result[name].push(value);
+            } else {
+              result[name] = value;
+            }
+          }
+          return result;
+        }
+
+        parseValue() {
+          const c = this.peek();
+          if (c === "<") {
+            this.pos++;
+            const msg = this.parseMessage(">");
+            if (this.peek() === ">") this.pos++;
+            return msg;
+          }
+          if (c === "{") {
+            this.pos++;
+            const msg = this.parseMessage("}");
+            if (this.peek() === "}") this.pos++;
+            return msg;
+          }
+          if (c === '"' || c === "'") return this.parseString(c);
+          if (c === "[") return this.parseList();
+          return this.parseScalar();
+        }
+
+        parseString(quote) {
+          this.pos++; // skip opening quote
+          let out = "";
+          while (!this.eof() && this.peek() !== quote) {
+            if (this.peek() === "\\") {
+              this.pos++;
+              const esc = this.peek();
+              if (esc === undefined) break;
+              switch (esc) {
+                case "n": out += "\n"; break;
+                case "t": out += "\t"; break;
+                case "r": out += "\r"; break;
+                case "\\": out += "\\"; break;
+                case '"': out += '"'; break;
+                case "'": out += "'"; break;
+                default: out += "\\" + esc;
+              }
+              this.pos++;
+            } else {
+              out += this.peek();
+              this.pos++;
+            }
+          }
+          if (this.peek() === quote) this.pos++;
+          return out;
+        }
+
+        parseScalar() {
+          const start = this.pos;
+          while (!this.eof()) {
+            const c = this.peek();
+            if (/\s/.test(c)) break;
+            if (c === "<" || c === ">" || c === "{" || c === "}" ||
+                c === "[" || c === "]" || c === "," || c === ";") break;
+            this.pos++;
+          }
+          const raw = this.s.substring(start, this.pos);
+          return this.coerce(raw);
+        }
+
+        parseList() {
+          this.pos++; // skip [
+          const arr = [];
+          this.skipWhitespace();
+          while (!this.eof() && this.peek() !== "]") {
+            arr.push(this.parseValue());
+            this.skipWhitespace();
+            if (this.peek() === ",") { this.pos++; this.skipWhitespace(); }
+          }
+          if (this.peek() === "]") this.pos++;
+          return arr;
+        }
+
+        coerce(v) {
+          if (v === "") return "";
+          if (v === "true") return true;
+          if (v === "false") return false;
+          if (v === "null" || v === "nil") return null;
+          if (/^-?\d+$/.test(v)) {
+            if (v.length > 15) return v;
+            return parseInt(v, 10);
+          }
+          if (/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
+          return v;
+        }
+      }
+
+      /**
+       * Detect & parse protobuf text format. Requires strong indicators:
+       *   - nested message in angle brackets: `field:<...>`, OR
+       *   - quoted string after lowercase field: `field:"value"`, OR
+       *   - 3+ lowercase_snake_case fields
+       * Extracts any leading non-field text as `_info`.
+       */
+      function tryParseProtoText(s) {
+        s = s.trim();
+        if (!s) return null;
+        // Don't fire for bracketed-label format ([REQUEST]={...}, [INFO]:..., etc).
+        // Let extractGoStructsFromText own that path.
+        if (/^\[[a-zA-Z_][a-zA-Z0-9_]*\]\s*[=:]/.test(s)) return null;
+        // Use \b word boundaries on lowercase regexes so we don't match the
+        // lowercase tail of CamelCase identifiers like 'tatus' inside 'Status:'.
+        const hasAngles =
+          /\b[a-z_]\w*\s*:\s*<[^>]*>/.test(s) ||
+          /\b[a-z_]\w*\s*:\s*<\s*>/.test(s);
+        const hasQuotedField = /\b[a-z_]\w*\s*:\s*"/.test(s);
+        const snakeFields = s.match(/\b[a-z_][a-z0-9_]*\s*:\s*[^\s,;]/g) || [];
+        if (!hasAngles && !hasQuotedField && snakeFields.length < 3) return null;
+
+        const m = s.match(/\b[a-z_][a-z0-9_]*\s*:/);
+        if (!m) return null;
+        const prefix = s.substring(0, m.index).trim().replace(/[:\-]\s*$/, "");
+        const body = s.substring(m.index);
+        try {
+          const parsed = new ProtoTextParser(body).parse();
+          if (Object.keys(parsed).length === 0) return null;
+          return prefix ? { _info: prefix, ...parsed } : parsed;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      /* ========================================================================
        *  Top-level format detector + extractor
        * ====================================================================== */
       /**
@@ -1161,6 +1352,10 @@
         const logfmt = tryParseLogfmt(stripped);
         if (logfmt) return { format: "logfmt", value: logfmt };
 
+        // Case H2: protobuf text format (whole input)
+        const proto = tryParseProtoText(stripped);
+        if (proto) return { format: "proto-text", value: proto };
+
         // Case I: log line with embedded [REQUEST]={...} etc.
         const extracted = extractGoStructsFromText(stripped);
         if (extracted) return { format: "go-embedded", value: extracted };
@@ -1351,6 +1546,19 @@
                 value = { _error: e.message, _raw: segment };
                 assigned = true;
               }
+            }
+          }
+
+          // Protobuf text format (`field_name:<...>`, `field:"..."`, etc.)
+          if (!assigned) {
+            const proto = tryParseProtoText(segment);
+            if (proto) {
+              if (lbl.prefix) {
+                value = { _info: lbl.prefix, ...proto };
+              } else {
+                value = proto;
+              }
+              assigned = true;
             }
           }
 
@@ -2151,6 +2359,9 @@
         } else if (s.format === "syslog") {
           badge.textContent = "syslog";
           badge.classList.add("syslog");
+        } else if (s.format === "proto-text") {
+          badge.textContent = "proto-text";
+          badge.classList.add("proto-text");
         } else if (s.format === "go" || s.format === "go-embedded") {
           badge.textContent = "Go struct";
           badge.classList.add("go");
@@ -2252,6 +2463,9 @@
           } else if (result.format === "syslog") {
             badge.textContent = "syslog";
             badge.classList.add("syslog");
+          } else if (result.format === "proto-text") {
+            badge.textContent = "proto-text";
+            badge.classList.add("proto-text");
           } else if (
             result.format === "go" ||
             result.format === "go-embedded"
