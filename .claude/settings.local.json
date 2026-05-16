@@ -3,7 +3,8 @@
     "allow": [
       "Bash(node test-parser.js)",
       "Bash(node -e ' *)",
-      "Bash(node test-all.js)"
+      "Bash(node test-all.js)",
+      "Read(//c/Users/hafidz.anandityo/.claude/projects/c--My-Projects-log-pharser/**)"
     ]
   }
 }

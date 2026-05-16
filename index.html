@@ -655,17 +655,60 @@
 
         parseValue() {
           const c = this.peek();
-          // '{' always opens a struct — Go's %+v never starts a string value
-          // with a bare '{' (would be quoted via %q if it did).
-          if (c === "{") return this.parseStruct();
-          // '[' is ambiguous: could be slice OR start of a string like
-          //   Message:[PASSCODE RESULT] Invalid Passcode
-          // Only treat as slice if the matching ']' is followed by a clean
-          // field separator. Skip over '"..."' regions during brace counting
-          // so polyline-like quoted strings don't break the count.
+          if (c === "{") {
+            // If `{` looks like JSON (`{"key":...`), parse with JSON parser.
+            // Common when a Go-struct field embeds a real JSON payload, e.g.
+            //   Content:{"booking_source":"WebReservation","customer":"..."}
+            if (this.peeksLikeJsonObject()) {
+              const closeIdx = this.findBalancedClose("{");
+              if (closeIdx > this.pos) {
+                const candidate = this.s.substring(this.pos, closeIdx + 1);
+                try {
+                  const parsed = forgivingJsonParse(candidate);
+                  if (parsed && typeof parsed === "object") {
+                    this.pos = closeIdx + 1;
+                    return parsed;
+                  }
+                } catch (_) {}
+              }
+            }
+            return this.parseStruct();
+          }
           if (c === "[" && this.isCleanSliceStart()) return this.parseSlice();
           if (this.match("map[")) return this.parseMap();
           return this.parseScalar();
+        }
+
+        /** True if current position has '{' followed by '"key":' (JSON-like). */
+        peeksLikeJsonObject() {
+          if (this.peek() !== "{") return false;
+          const window = this.s.substring(this.pos, this.pos + 200);
+          return /^\{\s*"[^"\\]*"\s*:/.test(window);
+        }
+
+        /** Find the balanced close of '{' or '[' at this.pos, skipping quoted strings. */
+        findBalancedClose(openChar) {
+          const closeChar = openChar === "{" ? "}" : "]";
+          let depth = 0;
+          let i = this.pos;
+          let inQuote = false;
+          while (i < this.s.length) {
+            const c = this.s[i];
+            if (inQuote) {
+              if (c === "\\") { i += 2; continue; }
+              if (c === '"') inQuote = false;
+              i++;
+              continue;
+            }
+            if (c === '"') { inQuote = true; i++; continue; }
+            if (c === openChar) depth++;
+            else if (c === closeChar) {
+              depth--;
+              if (depth === 0) return i;
+            }
+            i++;
+          }
+          return -1;
         }
 
         /** Lookahead from current '[' to decide if it's a real slice. */
@@ -775,7 +818,16 @@
           const start = this.pos;
           while (!this.eof()) {
             const c = this.s[this.pos];
-            if (c === " " && this.isNextFieldAt(this.pos)) break;
+            if (c === " " && this.isNextFieldAt(this.pos)) {
+              // Comma-list continuation: if we just consumed a ',' the
+              // following `Identifier:` is part of the same value (custom
+              // formatters like `UserInfo:A:1, B:2, C:3 NextField:...`).
+              if (this.pos > start && this.s[this.pos - 1] === ",") {
+                this.pos++;
+                continue;
+              }
+              break;
+            }
             if (c === "}" || c === "]") {
               if (this.looksLikeRealCloser(this.pos)) break;
             }
@@ -785,14 +837,17 @@
           return this.coerceScalar(raw);
         }
 
-        /** True if pos points to ' ' followed by [A-Z]\w* ':' — Go field separator. */
+        /** True if pos points to ' ' followed by [A-Z_]\w*':' — Go field separator.
+         *  Allows '-' inside the identifier so HTTP-style field names like
+         *  `Content-Length:` and `X-Forwarded-For:` are recognized.
+         */
         isNextFieldAt(pos) {
           if (this.s[pos] !== " ") return false;
           let p = pos + 1;
           if (p >= this.s.length) return false;
           if (!/[A-Z_]/.test(this.s[p])) return false;
           p++;
-          while (p < this.s.length && /[A-Za-z0-9_]/.test(this.s[p])) p++;
+          while (p < this.s.length && /[A-Za-z0-9_\-]/.test(this.s[p])) p++;
           return this.s[p] === ":";
         }
 
@@ -1445,15 +1500,21 @@
         const result = {};
         let foundAny = false;
 
-        // 1) Bracketed labels — both [LABEL]={...} and [label]: ... styles.
-        //    Accept any case and either '=' or ':' as separator.
-        const labelRe = /\[([a-zA-Z_][a-zA-Z0-9_]*)\]\s*[=:]\s*/g;
+        // 1) Bracketed labels — accept several styles:
+        //      [LABEL]={...}      with '=' separator
+        //      [label]:{...}      with ':' separator
+        //      [LABEL] {...}      no separator (whitespace only)
+        //    Require preceding whitespace or start-of-string so we don't
+        //    catch internal occurrences like `Header:[https]`.
+        const labelRe =
+          /(^|\s)\[([a-zA-Z_][a-zA-Z0-9_]*)\]\s*(?:[=:]\s*)?/g;
         const rawLabels = [];
         let m;
         while ((m = labelRe.exec(text)) !== null) {
+          const lead = m[1] || "";
           rawLabels.push({
-            name: m[1],
-            start: m.index,
+            name: m[2],
+            start: m.index + lead.length,
             valueStart: m.index + m[0].length,
           });
         }
